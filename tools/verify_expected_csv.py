@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from excel_privacy_cleaner.excel_processor import ExcelPrivacyProcessor  # noqa: E402
+from excel_privacy_cleaner.excel_processor import ExcelPrivacyProcessor, ProcessingOptions  # noqa: E402
 
 
 EXCLUDED_JUDGEMENTS = {"変換対象外", "要確認・自動変換しない"}
@@ -28,10 +28,12 @@ def main() -> int:
     parser.add_argument("source", type=Path)
     parser.add_argument("expected_csv", type=Path)
     parser.add_argument("--missed-csv", type=Path)
+    parser.add_argument("--mode", choices=("analysis", "external"), default="external")
     parser.add_argument("--max-details", type=int, default=40)
     args = parser.parse_args()
 
-    findings = ExcelPrivacyProcessor().scan(args.source)
+    options = ProcessingOptions(mode=args.mode, transform_business_secrets=args.mode == "external")
+    findings = ExcelPrivacyProcessor().scan(args.source, options=options)
     by_cell: dict[tuple[str, str], list] = defaultdict(list)
     for finding in findings:
         by_cell[(finding.sheet, finding.cell)].append(finding)

@@ -4,6 +4,8 @@ import re
 import shutil
 import tempfile
 import unicodedata
+import csv
+import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -29,6 +31,34 @@ class ColumnRule:
     kind: str
     headers: tuple[str, ...]
     contains: bool = False
+
+
+@dataclass(frozen=True)
+class ProcessingOptions:
+    mode: str = "analysis"
+    transform_business_secrets: bool = False
+    pseudonym_scope: str = "file"
+    birth_date_policy: str = "keep"
+
+    @property
+    def is_analysis(self) -> bool:
+        return self.mode == "analysis"
+
+    @property
+    def mode_label(self) -> str:
+        return "分析継続用" if self.is_analysis else "外部共有用"
+
+
+@dataclass(frozen=True)
+class ConversionResult:
+    excel_path: Path
+    csv_path: Path
+    report_path: Path
+    warnings: tuple[str, ...]
+    converted_count: int
+    review_count: int
+    formula_maintained_count: int
+    formula_changed_count: int
 
 
 COLUMN_RULES = (
@@ -64,6 +94,29 @@ HEADER_EXCLUDE_WORDS = ("仕様", "説明", "期待", "結果", "備考", "担�
 SKIP_SHEET_KEYWORDS = ("テスト仕様", "期待処理ルール")
 IGNORED_HEADER_WORDS = ("想定", "期待", "注意点", "出力例", "推奨")
 MISSING_VALUE_WORDS = {"匿名希望", "なし", "無し", "不明", "未回答", "該当なし", "-", "－", "ー", "N/A", "NA"}
+ANALYSIS_PRESERVED_KINDS = {
+    "money_million",
+    "salary_50k",
+    "bonus_100k",
+    "rate_10",
+    "birth_date",
+    "hire_date",
+    "rating",
+    "dependents",
+}
+BUSINESS_SECRET_KINDS = {
+    "company",
+    "supplier",
+    "project",
+    "organization",
+    "money_million",
+    "salary_50k",
+    "bonus_100k",
+    "rate_10",
+    "rating",
+    "dependents",
+}
+SENSITIVE_ENTITY_LABELS = {"氏名", "氏名候補", "電話番号", "メールアドレス", "メール候補", "個人番号", "銀行口座", "秘密情報"}
 ALIAS_PREFIXES = {
     "name": "個人",
     "name_candidate": "個人候補",
@@ -128,11 +181,13 @@ class ExcelPrivacyProcessor:
     def __init__(self) -> None:
         self.detector = JapanesePresidioDetector()
         self.alias_book = AliasBook()
+        self.options = ProcessingOptions()
         self.known_literals: dict[str, tuple[str, str]] = {}
         self.single_name_literals: dict[str, str] = {}
         self.cell_replacements: dict[tuple[str, str], str] = {}
         self.formula_cells: set[tuple[str, str]] = set()
         self.ambiguous_name_keys: set[str] = set()
+        self.scan_warnings: list[str] = []
         self.temp_dir: Path | None = None
         self.temp_workbook: Path | None = None
 
@@ -142,14 +197,16 @@ class ExcelPrivacyProcessor:
         self.temp_dir = None
         self.temp_workbook = None
 
-    def scan(self, workbook_path: Path) -> list[Finding]:
+    def scan(self, workbook_path: Path, options: ProcessingOptions | None = None) -> list[Finding]:
         self.cleanup()
+        self.options = options or ProcessingOptions()
         self.alias_book = AliasBook()
         self.known_literals = {}
         self.single_name_literals = {}
         self.cell_replacements = {}
         self.formula_cells = set()
         self.ambiguous_name_keys = set()
+        self.scan_warnings = []
         self.temp_dir = Path(tempfile.mkdtemp(prefix="ExcelPrivacyCleaner_"))
         self.temp_workbook = self.temp_dir / workbook_path.name
         shutil.copy2(workbook_path, self.temp_workbook)
@@ -161,7 +218,7 @@ class ExcelPrivacyProcessor:
         seen: set[tuple[str, str, str, str, str]] = set()
 
         for sheet in workbook.worksheets:
-            if any(keyword in sheet.title for keyword in SKIP_SHEET_KEYWORDS):
+            if any(keyword in sheet.title for keyword in SKIP_SHEET_KEYWORDS) and not self.options.is_analysis:
                 continue
             value_sheet = value_workbook[sheet.title]
             column_types = self._detect_column_types(sheet)
@@ -173,7 +230,7 @@ class ExcelPrivacyProcessor:
                 for cell in row:
                     if cell.coordinate in table_header_cells:
                         continue
-                    if cell.column in ignored_columns and cell.row > 1:
+                    if cell.column in ignored_columns and cell.row > 1 and not self.options.is_analysis:
                         continue
                     display_value = value_sheet[cell.coordinate].value if cell.data_type == "f" else cell.value
                     if display_value is None:
@@ -187,46 +244,56 @@ class ExcelPrivacyProcessor:
                     if category_entity:
                         replacement = str(category_entity.get("replacement") or replacement_for(category_entity["kind"], display_value, self.alias_book))
                         detection_kind = str(category_entity.get("detection_kind", "分類列"))
+                        kind = str(category_entity["kind"])
+                        enabled = self._default_enabled(bool(category_entity["enabled"]), kind, detection_kind, cell)
+                        reason = f"分類「{category_entity['category']}」"
+                        if bool(category_entity["enabled"]) and not enabled:
+                            reason += self._preserve_reason(kind, cell)
                         self._append_finding(
                             findings,
                             seen,
                             Finding(
-                                enabled=bool(category_entity["enabled"]),
+                                enabled=enabled,
                                 sheet=sheet.title,
                                 cell=cell.coordinate,
                                 entity_type=str(category_entity["label"]),
                                 detection_kind=detection_kind,
                                 original=text,
                                 replacement=replacement,
-                                reason=f"分類「{category_entity['category']}」",
+                                reason=reason,
                             ),
                         )
-                        if cell.data_type == "f" and bool(category_entity["enabled"]):
+                        if cell.data_type == "f" and enabled:
                             self.formula_cells.add((sheet.title, cell.coordinate))
                         continue
 
                     if column_entity and cell.row > column_entity["header_row"]:
                         if _is_missing_value(display_value):
                             continue
+                        kind = str(column_entity["kind"])
                         replacement = self.cell_replacements.get(
                             (sheet.title, cell.coordinate),
-                            replacement_for(column_entity["kind"], display_value, self.alias_book),
+                            replacement_for(kind, display_value, self.alias_book),
                         )
+                        enabled = self._default_enabled(True, kind, "列単位", cell)
+                        reason = f"見出し「{column_entity['header']}」"
+                        if not enabled:
+                            reason += self._preserve_reason(kind, cell)
                         self._append_finding(
                             findings,
                             seen,
                             Finding(
-                                enabled=True,
+                                enabled=enabled,
                                 sheet=sheet.title,
                                 cell=cell.coordinate,
                                 entity_type=str(column_entity["label"]),
                                 detection_kind="列単位",
                                 original=text,
                                 replacement=replacement,
-                                reason=f"見出し「{column_entity['header']}」",
+                                reason=reason,
                             ),
                         )
-                        if cell.data_type == "f":
+                        if cell.data_type == "f" and enabled:
                             self.formula_cells.add((sheet.title, cell.coordinate))
                         continue
 
@@ -248,18 +315,19 @@ class ExcelPrivacyProcessor:
                         if len(original) < 2 and not self.alias_book.has(kind, original):
                             continue
                         replacement = replacement_for(kind, original, self.alias_book)
+                        enabled = self._default_enabled(True, kind, "自由記述", cell)
                         self._append_finding(
                             findings,
                             seen,
                             Finding(
-                                enabled=True,
+                                enabled=enabled,
                                 sheet=sheet.title,
                                 cell=cell.coordinate,
                                 entity_type=entity_label(result.entity_type),
                                 detection_kind="自由記述",
                                 original=original,
                                 replacement=replacement,
-                                reason="Presidio カスタム Recognizer",
+                                reason="Presidio カスタム Recognizer" + (self._preserve_reason(kind, cell) if not enabled else ""),
                                 start=result.start,
                                 end=result.end,
                             ),
@@ -269,13 +337,63 @@ class ExcelPrivacyProcessor:
         value_workbook.close()
         return findings
 
-    def enabled_formula_replacement_count(self, findings: list[Finding]) -> int:
+    def enabled_formula_replacement_count(self, findings: list[Finding], options: ProcessingOptions | None = None) -> int:
+        active_options = options or self.options
+        if active_options.is_analysis:
+            return 0
         return len({(finding.sheet, finding.cell) for finding in findings if finding.enabled} & self.formula_cells)
 
-    def convert(self, source_path: Path, findings: list[Finding], output_dir: Path | None = None) -> Path:
+    def _default_enabled(self, base_enabled: bool, kind: str, detection_kind: str, cell) -> bool:
+        if not base_enabled and self.options.is_analysis and detection_kind == "確認候補":
+            return True
+        if not base_enabled:
+            return False
+        if cell.data_type == "f" and self.options.is_analysis:
+            return False
+        if not self.options.is_analysis:
+            return True
+        if kind in ANALYSIS_PRESERVED_KINDS:
+            return False
+        if kind in BUSINESS_SECRET_KINDS and not self.options.transform_business_secrets:
+            return False
+        return True
+
+    def _preserve_reason(self, kind: str, cell) -> str:
+        if cell.data_type == "f" and self.options.is_analysis:
+            return " / 分析継続用のため数式セルは維持"
+        if self.options.is_analysis and kind in ANALYSIS_PRESERVED_KINDS:
+            return " / 分析継続用のため型と値を維持"
+        if self.options.is_analysis and kind in BUSINESS_SECRET_KINDS and not self.options.transform_business_secrets:
+            return " / 分析継続用のため企業機密項目を維持"
+        return ""
+
+    def convert(
+        self,
+        source_path: Path,
+        findings: list[Finding],
+        output_dir: Path | None = None,
+        options: ProcessingOptions | None = None,
+    ) -> Path:
+        return self.convert_with_artifacts(
+            source_path,
+            findings,
+            output_dir=output_dir,
+            options=options,
+            write_artifacts=False,
+        ).excel_path
+
+    def convert_with_artifacts(
+        self,
+        source_path: Path,
+        findings: list[Finding],
+        output_dir: Path | None = None,
+        options: ProcessingOptions | None = None,
+        write_artifacts: bool = True,
+    ) -> ConversionResult:
         if not self.temp_workbook or not self.temp_workbook.exists():
             raise RuntimeError("先に検査を実行してください。")
 
+        active_options = options or self.options
         blocked_candidates = [finding for finding in findings if not finding.enabled and finding.detection_kind == "確認候補"]
         if blocked_candidates:
             preview = "、".join(f"{finding.sheet}!{finding.cell}" for finding in blocked_candidates[:8])
@@ -288,6 +406,7 @@ class ExcelPrivacyProcessor:
         if not selected:
             raise RuntimeError("変換対象が選択されていません。")
 
+        warnings = list(self.scan_warnings)
         keep_vba = source_path.suffix.lower() == ".xlsm"
         workbook = load_workbook(self.temp_workbook, keep_vba=keep_vba)
         sheet_map = {sheet.title: sheet for sheet in workbook.worksheets}
@@ -304,6 +423,9 @@ class ExcelPrivacyProcessor:
                 continue
             cell = sheet[coordinate]
             if cell.value is None:
+                continue
+            if active_options.is_analysis and cell.data_type == "f":
+                warnings.append(f"{sheet_name}!{coordinate}: 分析継続用のため数式セルの置換をスキップしました。")
                 continue
             current = str(cell.value)
             full_cell = [
@@ -336,11 +458,40 @@ class ExcelPrivacyProcessor:
                 current = _cleanup_alias_note_tail(current)
             cell.value = current
 
-        output_path = self._make_output_path(source_path, output_dir=output_dir)
+        if active_options.is_analysis:
+            _set_recalculate_on_open(workbook)
+
+        output_path = self._make_output_path(source_path, output_dir=output_dir, options=active_options)
         workbook.save(output_path)
         workbook.close()
+        validation = validate_output_workbook(source_path, output_path, findings, active_options)
+        warnings.extend(validation["warnings"])
+        csv_path = output_path.with_name(f"{output_path.stem}_検出変換結果.csv")
+        report_path = output_path.with_name(f"{output_path.stem}_処理報告書.txt")
+        converted_count = sum(1 for finding in findings if finding.enabled)
+        review_count = sum(1 for finding in findings if finding.detection_kind == "確認候補")
+        result = ConversionResult(
+            excel_path=output_path,
+            csv_path=csv_path,
+            report_path=report_path,
+            warnings=tuple(warnings),
+            converted_count=converted_count,
+            review_count=review_count,
+            formula_maintained_count=int(validation["formula_maintained_count"]),
+            formula_changed_count=int(validation["formula_changed_count"]),
+        )
+        if write_artifacts:
+            write_findings_csv(csv_path, findings)
+            write_processing_report(
+                report_path,
+                source_path=source_path,
+                result=result,
+                findings=findings,
+                options=active_options,
+                validation=validation,
+            )
         self.cleanup()
-        return output_path
+        return result
 
     @staticmethod
     def _detect_column_types(sheet: Worksheet) -> dict[int, dict[str, str | int]]:
@@ -565,9 +716,10 @@ class ExcelPrivacyProcessor:
                     if any(match_range.start < existing.stop and existing.start < match_range.stop for existing in occupied):
                         continue
                     candidate = match.group(0).endswith("さん")
+                    enabled = True if (candidate and self.options.is_analysis) else not candidate
                     findings.append(
                         Finding(
-                            enabled=not candidate,
+                            enabled=enabled,
                             sheet=sheet_name,
                             cell=coordinate,
                             entity_type="氏名候補" if candidate else "氏名",
@@ -593,16 +745,29 @@ class ExcelPrivacyProcessor:
                     normalize_alias_key("name", _strip_name_honorific(matched_text)) in self.ambiguous_name_keys
                     or _is_ambiguous_name_candidate(matched_text)
                 )
+                kind = _kind_for_label(label)
+                enabled = True if (candidate and self.options.is_analysis) else not candidate
+                if self.options.is_analysis and kind in BUSINESS_SECRET_KINDS and not self.options.transform_business_secrets:
+                    enabled = False
                 findings.append(
                     Finding(
-                        enabled=not candidate,
+                        enabled=enabled,
                         sheet=sheet_name,
                         cell=coordinate,
                         entity_type="氏名候補" if candidate else label,
                         detection_kind="確認候補" if candidate else "辞書一致",
                         original=matched_text,
                         replacement=_candidate_mask(matched_text, self.alias_book) if candidate else replacement,
-                        reason="曖昧な表記ゆれ候補" if candidate else "構造列から作成した同一人物・組織辞書",
+                        reason=(
+                            "曖昧な表記ゆれ候補"
+                            if candidate
+                            else "構造列から作成した同一人物・組織辞書"
+                        )
+                        + (
+                            " / 分析継続用のため企業機密項目を維持"
+                            if not enabled and kind in BUSINESS_SECRET_KINDS
+                            else ""
+                        ),
                         start=match.start(),
                         end=match.end(),
                     )
@@ -611,15 +776,263 @@ class ExcelPrivacyProcessor:
         return findings
 
     @staticmethod
-    def _make_output_path(source_path: Path, output_dir: Path | None = None) -> Path:
+    def _make_output_path(source_path: Path, output_dir: Path | None = None, options: ProcessingOptions | None = None) -> Path:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         suffix = ".xlsm" if source_path.suffix.lower() == ".xlsm" else ".xlsx"
         folder = output_dir if output_dir is not None else source_path.parent
         folder.mkdir(parents=True, exist_ok=True)
-        candidate = folder / f"{source_path.stem}_匿名化_{timestamp}{suffix}"
+        mode_label = (options or ProcessingOptions()).mode_label
+        candidate = folder / f"{source_path.stem}_{mode_label}_匿名化_{timestamp}{suffix}"
         if not candidate.exists():
             return candidate
-        return folder / f"{source_path.stem}_匿名化_{timestamp}_{datetime.now().microsecond:06d}{suffix}"
+        return folder / f"{source_path.stem}_{mode_label}_匿名化_{timestamp}_{datetime.now().microsecond:06d}{suffix}"
+
+
+def write_findings_csv(path: Path, findings: list[Finding]) -> None:
+    headers = [
+        "変換",
+        "処理状態",
+        "シート",
+        "セル",
+        "種類",
+        "検査",
+        "検出値",
+        "変換後",
+        "理由",
+    ]
+    with path.open("w", encoding="utf-8-sig", newline="") as output:
+        writer = csv.writer(output)
+        writer.writerow(headers)
+        for finding in findings:
+            status = "確認候補" if finding.detection_kind == "確認候補" else ("自動変換" if finding.enabled else "維持")
+            writer.writerow(
+                [
+                    "対象" if finding.enabled else "維持",
+                    status,
+                    finding.sheet,
+                    finding.cell,
+                    finding.entity_type,
+                    finding.detection_kind,
+                    finding.original,
+                    finding.replacement,
+                    finding.reason,
+                ]
+            )
+
+
+def write_processing_report(
+    path: Path,
+    *,
+    source_path: Path,
+    result: ConversionResult,
+    findings: list[Finding],
+    options: ProcessingOptions,
+    validation: dict[str, Any],
+) -> None:
+    business_kept = [
+        finding
+        for finding in findings
+        if not finding.enabled and _kind_for_label(finding.entity_type) in BUSINESS_SECRET_KINDS
+    ]
+    lines = [
+        "Excel匿名化 処理報告書",
+        "",
+        f"処理モード: {options.mode_label}",
+        f"仮名化範囲: {_scope_label(options.pseudonym_scope)}",
+        f"企業機密も変換する: {'オン' if options.transform_business_secrets else 'オフ'}",
+        f"入力ファイル名: {source_path.name}",
+        f"出力ファイル名: {result.excel_path.name}",
+        f"処理日時: {datetime.now():%Y-%m-%d %H:%M:%S}",
+        f"検出件数: {len(findings)}",
+        f"変換件数: {result.converted_count}",
+        f"要確認件数: {result.review_count}",
+        f"変換しなかった企業機密項目: {len(business_kept)}",
+        f"数式維持件数: {result.formula_maintained_count}",
+        f"数式変更件数: {result.formula_changed_count}",
+        "",
+        "非対応機能:",
+    ]
+    unsupported = validation.get("unsupported_features", [])
+    lines.extend([f"- {item}" for item in unsupported] or ["- なし"])
+    lines.extend(["", "XLSX内部検査結果:"])
+    lines.append(str(validation.get("internal_scan_result", "未実施")))
+    lines.extend(["", "警告内容:"])
+    lines.extend([f"- {warning}" for warning in result.warnings] or ["- なし"])
+    lines.extend(["", "変換しなかった企業機密項目の例:"])
+    for finding in business_kept[:30]:
+        lines.append(f"- {finding.sheet}!{finding.cell} {finding.entity_type}: {finding.original}")
+    if not business_kept:
+        lines.append("- なし")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def validate_output_workbook(
+    source_path: Path,
+    output_path: Path,
+    findings: list[Finding],
+    options: ProcessingOptions,
+) -> dict[str, Any]:
+    warnings: list[str] = []
+    unsupported_features: list[str] = []
+    try:
+        source = load_workbook(source_path, data_only=False)
+        output = load_workbook(output_path, data_only=False)
+    except Exception as exc:
+        return {
+            "warnings": [f"出力XLSXを再読み込みできませんでした: {exc}"],
+            "unsupported_features": ["検証未完了"],
+            "internal_scan_result": "読み込み失敗",
+            "formula_maintained_count": 0,
+            "formula_changed_count": 0,
+        }
+
+    try:
+        if source.sheetnames != output.sheetnames:
+            warnings.append("シート数またはシート順が変化しています。")
+        formula_maintained_count = 0
+        formula_changed_count = 0
+        for sheet_name in source.sheetnames:
+            if sheet_name not in output.sheetnames:
+                continue
+            source_sheet = source[sheet_name]
+            output_sheet = output[sheet_name]
+            if source_sheet.max_row != output_sheet.max_row or source_sheet.max_column != output_sheet.max_column:
+                warnings.append(f"{sheet_name}: 行数または列数が変化しています。")
+            if len(source_sheet.tables) != len(output_sheet.tables):
+                warnings.append(f"{sheet_name}: Excelテーブル数が変化しています。")
+            if len(source_sheet.conditional_formatting) != len(output_sheet.conditional_formatting):
+                warnings.append(f"{sheet_name}: 条件付き書式数が変化しています。")
+            if source_sheet.data_validations.count != output_sheet.data_validations.count:
+                warnings.append(f"{sheet_name}: 入力規則数が変化しています。")
+            for row in source_sheet.iter_rows():
+                for source_cell in row:
+                    output_cell = output_sheet[source_cell.coordinate]
+                    if source_cell.data_type == "f":
+                        if output_cell.data_type == "f" and output_cell.value == source_cell.value:
+                            formula_maintained_count += 1
+                        else:
+                            formula_changed_count += 1
+                            warnings.append(f"{sheet_name}!{source_cell.coordinate}: 数式が維持されていません。")
+                    if options.is_analysis and isinstance(source_cell.value, (int, float)) and not isinstance(source_cell.value, bool):
+                        if not isinstance(output_cell.value, (int, float)) or isinstance(output_cell.value, bool):
+                            warnings.append(f"{sheet_name}!{source_cell.coordinate}: 数値型が維持されていません。")
+                    if options.is_analysis and isinstance(source_cell.value, (datetime, date)):
+                        if not isinstance(output_cell.value, (datetime, date)):
+                            warnings.append(f"{sheet_name}!{source_cell.coordinate}: 日付型が維持されていません。")
+            unsupported_features.extend(_inspect_hidden_surfaces(source_sheet, source_path.name))
+        unsupported_features.extend(_inspect_package_features(output_path))
+    finally:
+        source.close()
+        output.close()
+
+    sensitive_values = _sensitive_original_values(findings)
+    leaked = _scan_xlsx_package(output_path, sensitive_values)
+    internal_scan_result = "残存なし"
+    if leaked:
+        internal_scan_result = f"元識別情報の残存候補 {len(leaked)} 件"
+        warnings.extend([f"内部XML残存候補: {item}" for item in leaked[:30]])
+
+    return {
+        "warnings": warnings,
+        "unsupported_features": sorted(set(unsupported_features)) or ["なし"],
+        "internal_scan_result": internal_scan_result,
+        "formula_maintained_count": formula_maintained_count,
+        "formula_changed_count": formula_changed_count,
+    }
+
+
+def _set_recalculate_on_open(workbook) -> None:
+    calculation = getattr(workbook, "calculation", None)
+    if calculation is None:
+        return
+    for attr in ("fullCalcOnLoad", "forceFullCalc"):
+        if hasattr(calculation, attr):
+            setattr(calculation, attr, True)
+
+
+def _inspect_hidden_surfaces(sheet: Worksheet, source_name: str) -> list[str]:
+    notes: list[str] = []
+    if sheet.sheet_state != "visible":
+        notes.append(f"非表示シートを検出: {sheet.title}")
+    if any(dimension.hidden for dimension in sheet.row_dimensions.values()):
+        notes.append(f"非表示行を検出: {sheet.title}")
+    if any(dimension.hidden for dimension in sheet.column_dimensions.values()):
+        notes.append(f"非表示列を検出: {sheet.title}")
+    comments = [cell.coordinate for row in sheet.iter_rows() for cell in row if cell.comment is not None]
+    if comments:
+        notes.append(f"コメント/メモを検出: {sheet.title} {len(comments)} 件。コメント本文の自動置換は限定対応です。")
+    if sheet.data_validations.count:
+        notes.append(f"入力規則を検出: {sheet.title} {sheet.data_validations.count} 件。メッセージ本文の自動置換は限定対応です。")
+    return notes
+
+
+def _inspect_package_features(path: Path) -> list[str]:
+    notes: list[str] = []
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = archive.namelist()
+    except zipfile.BadZipFile:
+        return ["XLSX ZIP構造を読み取れませんでした。"]
+    if any(name.startswith("xl/charts/") for name in names):
+        notes.append("グラフを検出。グラフタイトル/データラベル内文字列の自動置換は限定対応です。")
+    if any(name.startswith("xl/pivotCache/") or name.startswith("xl/pivotTables/") for name in names):
+        notes.append("ピボットテーブル/ピボットキャッシュを検出。キャッシュ内文字列の自動置換は限定対応です。")
+    if any(name.startswith("customXml/") for name in names):
+        notes.append("カスタムXMLを検出。カスタムXML内文字列の自動置換は限定対応です。")
+    if any(name.startswith("xl/embeddings/") for name in names):
+        notes.append("埋め込みオブジェクトを検出。埋め込みオブジェクト内文字列の自動置換は未対応です。")
+    if any(name.startswith("xl/externalLinks/") for name in names):
+        notes.append("外部リンクを検出。外部リンク先の安全性確認が必要です。")
+    return notes
+
+
+def _sensitive_original_values(findings: list[Finding]) -> list[str]:
+    values: set[str] = set()
+    for finding in findings:
+        if finding.entity_type not in SENSITIVE_ENTITY_LABELS:
+            continue
+        normalized = _normalize_ascii(finding.original)
+        if _is_placeholder_value(normalized):
+            continue
+        if len(normalized) >= 3 and normalized not in MISSING_VALUE_WORDS:
+            values.add(normalized)
+    return sorted(values, key=len, reverse=True)
+
+
+def _scan_xlsx_package(path: Path, sensitive_values: list[str]) -> list[str]:
+    if not sensitive_values:
+        return []
+    leaked: list[str] = []
+    try:
+        with zipfile.ZipFile(path) as archive:
+            for name in archive.namelist():
+                if not name.endswith((".xml", ".rels")):
+                    continue
+                text = archive.read(name).decode("utf-8", errors="ignore")
+                for value in sensitive_values:
+                    if value in text:
+                        leaked.append(f"{name}: {value}")
+                        break
+    except zipfile.BadZipFile:
+        leaked.append("XLSXをZIPとして展開できませんでした。")
+    return leaked
+
+
+def _scope_label(scope: str) -> str:
+    return {
+        "file": "このファイル内だけ",
+        "batch": "今回アップロードした一連のファイル内",
+        "project": "プロジェクト内",
+    }.get(scope, scope)
+
+
+def _is_placeholder_value(value: str) -> bool:
+    lowered = value.lower()
+    if lowered.endswith("@example.invalid"):
+        return True
+    if re.fullmatch(r"(?:個人|個人候補|法人|案件|社員|会員|仕入先|組織|住所|予定日時|伏字)\d{3}(?:さん|様|部長|課長|係長|主任|担当|殿|氏)?", value):
+        return True
+    return False
 
 
 def _match_column_rule(header: str) -> ColumnRule | None:
@@ -630,6 +1043,25 @@ def _match_column_rule(header: str) -> ColumnRule | None:
         if rule.contains and any(word in header for word in rule.headers):
             return rule
     return None
+
+
+def _kind_for_label(label: str) -> str:
+    mapping = {
+        "氏名": "name",
+        "氏名候補": "name",
+        "住所": "address",
+        "会社名": "company",
+        "仕入先": "supplier",
+        "案件名": "project",
+        "組織名": "organization",
+        "メールアドレス": "email",
+        "メール候補": "email",
+        "電話番号": "phone",
+        "個人番号": "personal_number",
+        "銀行口座": "bank_account",
+        "秘密情報": "secret",
+    }
+    return mapping.get(label, "text")
 
 
 def _is_likely_header(header: str) -> bool:
@@ -964,7 +1396,7 @@ def _mask_phone(value: str) -> str:
 
 def _mask_bank_account(value: str) -> str:
     normalized = _normalize_ascii(value)
-    return re.sub(r"[0-9]{7,}", lambda match: "*" * max(4, len(match.group(0)) - 3) + match.group(0)[-3:], normalized)
+    return re.sub(r"[0-9]{4,}", lambda match: "*" * len(match.group(0)), normalized)
 
 
 def _number(value: Any) -> float | None:

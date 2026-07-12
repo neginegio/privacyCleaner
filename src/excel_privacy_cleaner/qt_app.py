@@ -9,6 +9,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent, QIcon
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -23,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .excel_processor import ExcelPrivacyProcessor
+from .excel_processor import ExcelPrivacyProcessor, ProcessingOptions, write_findings_csv
 from .models import Finding
 
 
@@ -53,6 +55,10 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         self.path_label = QLabel("未選択")
         self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.status_label = QLabel("待機中: 外部クラウドへ送信しません。")
+        self.mode_combo = QComboBox()
+        self.business_secret_checkbox = QCheckBox("企業機密も変換する")
+        self.scope_combo = QComboBox()
+        self.mode_note = QLabel("")
         self.history = QListWidget()
         self.table = QTableWidget(0, 8)
         self._build_ui()
@@ -66,6 +72,28 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         title = QLabel("Excel ファイルを選択してください。Presidio による検出はこの PC 内だけで行い、原本は上書きしません。")
         title.setStyleSheet("font-size: 15px; font-weight: 600;")
         layout.addWidget(title)
+
+        mode_row = QHBoxLayout()
+        self.mode_combo.addItem("分析継続用", "analysis")
+        self.mode_combo.addItem("外部共有用", "external")
+        self.scope_combo.addItem("このファイル内だけ", "file")
+        self.scope_combo.addItem("今回アップロードした一連のファイル内", "batch")
+        self.scope_combo.addItem("プロジェクト内", "project")
+        self.business_secret_checkbox.setChecked(False)
+        self.mode_combo.currentIndexChanged.connect(self.update_mode_note)
+        self.business_secret_checkbox.stateChanged.connect(self.update_mode_note)
+        mode_row.addWidget(QLabel("処理モード:"))
+        mode_row.addWidget(self.mode_combo)
+        mode_row.addWidget(QLabel("仮名化範囲:"))
+        mode_row.addWidget(self.scope_combo)
+        mode_row.addWidget(self.business_secret_checkbox)
+        mode_row.addStretch(1)
+        layout.addLayout(mode_row)
+
+        self.mode_note.setWordWrap(True)
+        self.mode_note.setStyleSheet("border: 1px solid #fde68a; padding: 6px; background: #fffbeb; color: #713f12;")
+        layout.addWidget(self.mode_note)
+        self.update_mode_note()
 
         file_row = QHBoxLayout()
         choose_button = QPushButton("Excelを選択")
@@ -157,10 +185,11 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         try:
             self.status_label.setText("検査中: Presidio カスタム Recognizer でローカル解析しています...")
             QApplication.processEvents()
-            self.findings = self.processor.scan(self.source_path)
+            options = self.current_options()
+            self.findings = self.processor.scan(self.source_path, options=options)
             self.refresh_table()
-            formula_count = self.processor.enabled_formula_replacement_count(self.findings)
-            formula_note = f" 数式文字列化予定: {formula_count} 件。" if formula_count else ""
+            formula_count = self.processor.enabled_formula_replacement_count(self.findings, options=options)
+            formula_note = f" 数式文字列化予定: {formula_count} 件。" if formula_count else " 数式は維持します。"
             self.status_label.setText(f"検査完了: {len(self.findings)} 件を検出しました。変換対象を確認してください。{formula_note}")
         except Exception as exc:
             QMessageBox.critical(self, "検査エラー", str(exc))
@@ -174,19 +203,22 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             self.update_findings_from_table()
             self.status_label.setText("変換中: 一時コピーへ置換を適用しています...")
             QApplication.processEvents()
-            output_path = self.processor.convert(self.source_path, self.findings)
-            converted_count = sum(1 for finding in self.findings if finding.enabled)
-            formula_count = self.processor.enabled_formula_replacement_count(self.findings)
-            formula_note = f"  数式文字列化 {formula_count} 件" if formula_count else ""
+            options = self.current_options()
+            result = self.processor.convert_with_artifacts(self.source_path, self.findings, options=options)
+            output_path = result.excel_path
+            converted_count = result.converted_count
+            formula_note = f"  数式維持 {result.formula_maintained_count} 件" if result.formula_maintained_count else ""
             self.history.insertItem(
                 0,
-                f"{datetime.now():%Y/%m/%d %H:%M:%S}  {converted_count} 件変換{formula_note}  {output_path.name}  一時ファイル削除済み",
+                f"{datetime.now():%Y/%m/%d %H:%M:%S}  {options.mode_label}  {converted_count} 件変換{formula_note}  {output_path.name}  一時ファイル削除済み",
             )
             self.status_label.setText(f"保存完了: {output_path}")
             QMessageBox.information(
                 self,
                 "保存完了",
-                f"匿名化済み Excel を保存しました。\n\n{output_path}\n\n原本は上書きしていません。一時コピーは削除済みです。",
+                "匿名化済み Excel、検出・変換結果CSV、処理報告書を保存しました。\n\n"
+                f"Excel: {result.excel_path}\nCSV: {result.csv_path}\n報告書: {result.report_path}\n\n"
+                "原本は上書きしていません。一時コピーは削除済みです。",
             )
         except Exception as exc:
             QMessageBox.critical(self, "変換エラー", str(exc))
@@ -213,7 +245,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             path = path.with_suffix(".csv")
 
         try:
-            self._write_findings_csv(path)
+            write_findings_csv(path, self.findings)
             self.status_label.setText(f"CSV出力完了: {path}")
             QMessageBox.information(self, "CSV出力完了", f"検出結果CSVを保存しました。\n\n{path}")
         except Exception as exc:
@@ -268,6 +300,25 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
     def clear_history(self) -> None:
         self.history.clear()
         self.status_label.setText("履歴を消去しました。")
+
+    def current_options(self) -> ProcessingOptions:
+        mode = str(self.mode_combo.currentData())
+        return ProcessingOptions(
+            mode=mode,
+            transform_business_secrets=self.business_secret_checkbox.isChecked() or mode == "external",
+            pseudonym_scope=str(self.scope_combo.currentData()),
+        )
+
+    def update_mode_note(self) -> None:
+        options = self.current_options()
+        self.business_secret_checkbox.setEnabled(options.is_analysis)
+        if options.is_analysis:
+            self.mode_note.setText(
+                "分析継続用では、金額、数量、原価、評価などの分析項目を維持します。"
+                "外部へ提供する場合は、企業機密情報の追加変換を確認してください。"
+            )
+        else:
+            self.mode_note.setText("外部共有用では、既存の匿名化方針に近い形で企業機密項目も変換対象にします。")
 
     def _default_csv_name(self) -> str:
         folder = self.source_path.parent if self.source_path else Path.cwd()

@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from excel_privacy_cleaner.excel_processor import ExcelPrivacyProcessor  # noqa: E402
+from excel_privacy_cleaner.excel_processor import ExcelPrivacyProcessor, ProcessingOptions  # noqa: E402
 
 
 def safe(value: str) -> str:
@@ -24,16 +24,19 @@ def main() -> int:
     missed_path = root / "Excel匿名化アプリ_未検出項目一覧.csv"
     wrong_path = root / "Excel匿名化アプリ_テストデータ_検出結果_期待値追記済み.csv"
 
-    findings = ExcelPrivacyProcessor().scan(workbook_path)
+    findings = ExcelPrivacyProcessor().scan(
+        workbook_path,
+        options=ProcessingOptions(mode="external", transform_business_secrets=True),
+    )
     by_cell = {(finding.sheet, finding.cell): [] for finding in findings}
     for finding in findings:
         by_cell.setdefault((finding.sheet, finding.cell), []).append(finding)
 
-    missed_rows = read_csv(missed_path)
+    missed_rows = read_csv(missed_path) if missed_path.exists() else []
     fixed_missed = [row for row in missed_rows if by_cell.get((row["シート"], row["セル"]))]
     still_missed = [row for row in missed_rows if not by_cell.get((row["シート"], row["セル"]))]
 
-    wrong_rows = read_csv(wrong_path)
+    wrong_rows = read_csv(wrong_path) if wrong_path.exists() else []
     excluded_rows = [
         row
         for row in wrong_rows
@@ -46,6 +49,10 @@ def main() -> int:
             still_detected.append(row)
 
     print(f"findings={len(findings)}")
+    if not missed_path.exists():
+        print("missed_csv=not_found")
+    if not wrong_path.exists():
+        print("expected_csv=not_found")
     print(f"missed_fixed={len(fixed_missed)}/{len(missed_rows)}")
     print(f"missed_remaining={len(still_missed)}")
     for row in still_missed[:30]:
