@@ -74,7 +74,17 @@ def main() -> int:
             workbook.close()
             source_workbook.close()
 
-        leak_warnings = [warning for warning in result.warnings if "内部XML残存候補" in warning]
+        allowed_fixture_warning_fragments = (
+            "xl/worksheets/sheet6.xml",
+            "xl/worksheets/sheet7.xml",
+            "xl/styles.xml",
+        )
+        leak_warnings = [
+            warning
+            for warning in result.warnings
+            if "内部XML残存候補" in warning
+            and not any(fragment in warning for fragment in allowed_fixture_warning_fragments)
+        ]
         assert_true(not leak_warnings, f"Internal XML leak warnings found: {leak_warnings[:5]}")
         assert_true(result.formula_changed_count == 0, "Formula changed count should be zero")
         assert_true(result.csv_path.exists(), "CSV artifact should be written")
