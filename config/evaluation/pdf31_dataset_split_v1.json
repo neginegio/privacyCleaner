@@ -1,0 +1,13 @@
+{
+  "dataset_version": "pdf31_dataset_split_v1",
+  "baseline_source_commit": "adf1fa3",
+  "development_pages": [5, 6, 10, 11, 13, 15],
+  "validation_ocr_eligible_pages": [1, 2, 3, 7, 8, 16, 31],
+  "validation_ocr_failed_pages": [22],
+  "final_test_pages": [4, 9, 12, 14, 17, 18, 19, 20, 21, 23, 24, 25, 26, 27, 28, 29, 30],
+  "usage_policy": {
+    "candidate_generation": "Do not read this file from candidate generation code.",
+    "allowed_use": "Dataset splitting, review target selection, and evaluation aggregation only.",
+    "failed_page_policy": "Page 22 is evaluated separately from OCR-eligible validation recall."
+  }
+}

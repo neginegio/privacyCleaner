@@ -1,0 +1,49 @@
+{
+  "baseline_name": "PDF anonymization detection Baseline v1",
+  "dataset_version": "pdf31_dataset_split_v1",
+  "baseline_source_commit": "adf1fa3",
+  "created_at": "2026-07-21",
+  "evaluation_target_pages": {
+    "development_pages": [5, 6, 10, 11, 13, 15],
+    "validation_ocr_eligible_pages": [1, 2, 3, 7, 8, 16, 31],
+    "validation_ocr_failed_pages": [22],
+    "final_test_pages": [4, 9, 12, 14, 17, 18, 19, 20, 21, 23, 24, 25, 26, 27, 28, 29, 30]
+  },
+  "baseline_results": {
+    "development_formal_evaluation": {
+      "formal_evaluation_count": 49,
+      "detected_count": 0,
+      "missed_count": 49,
+      "false_positive_count": 0,
+      "average_coverage": 0.0
+    },
+    "candidate_generation_without_ground_truth": {
+      "generated_candidate_count": 0
+    },
+    "reordered_page_test": {
+      "generated_candidate_count": 0
+    },
+    "layout_95_percent_scale_test": {
+      "generated_candidate_count": 0
+    },
+    "validation_ocr_eligible_initial_candidates": {
+      "generated_candidate_count": 0
+    },
+    "validation_ocr_failed_page22_initial_candidates": {
+      "generated_candidate_count": 0
+    },
+    "independence_audit": {
+      "pass_count": 6,
+      "total_count": 6
+    }
+  },
+  "practicality_judgement": "Not practical for automatic PDF anonymization yet. Candidate generation recall is insufficient after leakage removal.",
+  "future_evaluation_policy": [
+    "Use development_pages only when improving detection rules.",
+    "Use validation_ocr_eligible_pages only for validation after ground truth is user-confirmed.",
+    "Evaluate page 22 separately as an OCR quality FAILED page.",
+    "Do not create or inspect final_test_pages ground truth until the final generalization evaluation.",
+    "Do not store personal names, company names, source text, ground-truth text, coordinates, HMAC values, or secrets in baseline files."
+  ],
+  "required_report_wording": "代表6ページの開発用ベンチマーク49矩形では、評価データが候補生成側へ混入した状態で49件一致した。正解CSV、truth_id、正解座標、固定ページ処理、固定座標処理を候補生成から除去すると、通常候補生成は0件となった。したがって、以前の49件一致は汎化性能評価には使用しない。"
+}
