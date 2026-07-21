@@ -204,7 +204,7 @@ class PdfPrivacyProcessor:
                     try:
                         ocr_text, ocr_words = ocr_page_text_and_words(page)
                         ocr_candidates = detect_ocr_candidates(ocr_words, page.rect)
-                        ocr_candidates.extend(context_candidates_for_page(page_index + 1, page.rect))
+                        ocr_candidates.extend(context_candidates_for_page(page_index + 1, page.rect, ocr_words))
                         self.page_quality[page_index] = evaluate_page_quality(page, ocr_text, ocr_words, ocr_candidates)
                         self._initialize_page_state(page_index)
                         for candidate in ocr_candidates:
