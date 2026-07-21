@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import shutil
 import sys
@@ -13,16 +14,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import fitz  # noqa: E402
 
-from excel_privacy_cleaner.pdf_processor import PdfPrivacyProcessor  # noqa: E402
+from excel_privacy_cleaner.pdf_processor import PdfPrivacyProcessor, final_output_status  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "PDFテストデータ２.pdf"
 OUTPUT_DIR = ROOT / "ocr_quality_outputs"
+DATASET_SPLIT_JSON = ROOT / "config" / "evaluation" / "pdf31_dataset_split_v1.json"
 FORMAL_GROUND_TRUTH_CSV = OUTPUT_DIR / "PDF31代表6ページ_ユーザー確認済み正解データ_v1.csv"
-REPRESENTATIVE_PAGES = (5, 6, 10, 11, 13, 15)
 REORDERED_SOURCE_PAGES = (15, 5, 13, 11, 6, 10)
-HOLDOUT_PAGES = (1, 2, 3, 7, 8, 16, 22, 31)
+
+
+def load_dataset_split() -> dict[str, Any]:
+    return json.loads(DATASET_SPLIT_JSON.read_text(encoding="utf-8"))
+
+
+def pages_from_split(key: str) -> tuple[int, ...]:
+    split = load_dataset_split()
+    return tuple(int(page) for page in split[key])
 
 
 @contextmanager
@@ -63,34 +72,34 @@ def audit_detection_independence() -> dict[str, str]:
     formal_name = FORMAL_GROUND_TRUTH_CSV.name
     checks = [
         {
-            "検査項目": "pdf_context_rules.pyが正解CSVを読み込んでいない",
-            "判定": "PASS" if formal_name not in context_text and "DictReader" not in context_text and ".open(" not in context_text else "FAIL",
+            "検査項目": "候補生成コードが正解CSVを参照していない",
+            "判定": "PASS" if formal_name not in detection_text and "DictReader" not in context_text and ".open(" not in context_text else "FAIL",
             "根拠": str(context_path.relative_to(ROOT)),
         },
         {
-            "検査項目": "正解CSVのファイル名が検出処理内に存在しない",
-            "判定": "PASS" if formal_name not in detection_text else "FAIL",
-            "根拠": "src/excel_privacy_cleaner/pdf_context_rules.py + pdf_processor.py",
-        },
-        {
-            "検査項目": "truth_idが候補生成処理で使用されていない",
+            "検査項目": "候補生成コードがtruth_idを参照していない",
             "判定": "PASS" if "truth_id" not in detection_text else "FAIL",
             "根拠": "src/excel_privacy_cleaner/pdf_context_rules.py + pdf_processor.py",
         },
         {
-            "検査項目": "P10/P11/P13/P15などのページ番号固定座標処理がない",
-            "判定": "PASS" if not any(token in detection_text for token in ("P10", "P11", "P13", "P15", "page == 10", "page == 11", "page == 13", "page == 15")) else "FAIL",
+            "検査項目": "候補生成コードが正解座標を参照していない",
+            "判定": "PASS" if "正解座標" not in detection_text and "ground_truth" not in detection_text else "FAIL",
+            "根拠": "src/excel_privacy_cleaner/pdf_context_rules.py + pdf_processor.py",
+        },
+        {
+            "検査項目": "候補生成コードが固定ページ番号を使用していない",
+            "判定": "PASS" if not any(token in detection_text for token in ("P10", "P11", "P13", "P15", "page == 10", "page == 11", "page == 13", "page == 15", "page_number == 10", "page_number == 11", "page_number == 13", "page_number == 15")) else "FAIL",
             "根拠": "検出処理内の固定ページID/ページ番号条件",
         },
         {
-            "検査項目": "49件の正解座標がコードへ直接記述されていない",
+            "検査項目": "候補生成コードが固定座標を使用していない",
             "判定": "PASS" if "ContextCandidateSpec(" not in context_text else "FAIL",
             "根拠": str(context_path.relative_to(ROOT)),
         },
         {
-            "検査項目": "正解文字列から正解座標を返す処理がない",
-            "判定": "PASS" if "REPRESENTATIVE_PAGE_SPECS" not in detection_text and "正解座標" not in detection_text else "FAIL",
-            "根拠": "候補生成側に正解データ構造なし",
+            "検査項目": "候補生成コードが評価用データセット設定を参照していない",
+            "判定": "PASS" if DATASET_SPLIT_JSON.name not in detection_text and "development_pages" not in detection_text and "validation_ocr_eligible_pages" not in detection_text else "FAIL",
+            "根拠": "src/excel_privacy_cleaner/pdf_context_rules.py + pdf_processor.py",
         },
     ]
     write_csv(OUTPUT_DIR / "PDF31評価データ混入検査.csv", checks, ["検査項目", "判定", "根拠"])
@@ -150,8 +159,9 @@ def scan_without_ground_truth() -> dict[str, Any]:
         moved = True
     try:
         findings, elapsed, _processor = scan_pdf(SOURCE, "正解CSVなし候補生成")
-        count = count_pages(findings, REPRESENTATIVE_PAGES)
-        rows = findings_rows(findings, REPRESENTATIVE_PAGES)
+        representative_pages = pages_from_split("development_pages")
+        count = count_pages(findings, representative_pages)
+        rows = findings_rows(findings, representative_pages)
         write_csv(OUTPUT_DIR / "PDF31代表6ページ_正解CSVなし候補一覧.csv", rows)
         result = {
             "検査": "正解CSVなし候補生成",
@@ -183,8 +193,9 @@ def create_reordered_pdf(path: Path) -> dict[int, int]:
 
 def create_scaled_pdf(path: Path, scale: float = 0.95) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    representative_pages = pages_from_split("development_pages")
     with fitz.open(SOURCE) as source_doc, fitz.open() as output_doc:
-        for source_page in REPRESENTATIVE_PAGES:
+        for source_page in representative_pages:
             page = source_doc[source_page - 1]
             new_page = output_doc.new_page(width=page.rect.width, height=page.rect.height)
             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
@@ -221,8 +232,9 @@ def scan_scaled_pdf() -> dict[str, Any]:
     pdf_path = OUTPUT_DIR / "PDF31代表6ページ_縮小95テスト.pdf"
     create_scaled_pdf(pdf_path)
     findings, elapsed, _processor = scan_pdf(pdf_path, "縮小95候補生成")
-    count = count_pages(findings, tuple(range(1, len(REPRESENTATIVE_PAGES) + 1)))
-    rows = findings_rows(findings, tuple(range(1, len(REPRESENTATIVE_PAGES) + 1)))
+    representative_page_indexes = tuple(range(1, len(pages_from_split("development_pages")) + 1))
+    count = count_pages(findings, representative_page_indexes)
+    rows = findings_rows(findings, representative_page_indexes)
     write_csv(OUTPUT_DIR / "PDF31代表6ページ_レイアウト変更候補一覧.csv", rows)
     result = {
         "検査": "軽微なレイアウト変更_95%縮小",
@@ -237,9 +249,12 @@ def scan_scaled_pdf() -> dict[str, Any]:
     return result
 
 
-def holdout_initial_candidates() -> dict[str, Any]:
+def validation_initial_candidates() -> dict[str, Any]:
     findings, elapsed, _processor = scan_pdf(SOURCE, "ホールドアウト初回候補")
-    rows = findings_rows(findings, HOLDOUT_PAGES)
+    validation_pages = pages_from_split("validation_ocr_eligible_pages")
+    failed_pages = pages_from_split("validation_ocr_failed_pages")
+    rows = findings_rows(findings, validation_pages)
+    failed_rows = findings_rows(findings, failed_pages)
     selection_rows = [
         {"ページ番号": 1, "選定理由": "表紙/概要系の可能性があり代表6ページと構造が異なる"},
         {"ページ番号": 2, "選定理由": "目次または導入系として候補密度が低い可能性を確認"},
@@ -247,18 +262,45 @@ def holdout_initial_candidates() -> dict[str, Any]:
         {"ページ番号": 7, "選定理由": "役員/株主ページ以外の表構造を確認"},
         {"ページ番号": 8, "選定理由": "代表ページ外の表または説明文を確認"},
         {"ページ番号": 16, "選定理由": "販売先ページ近傍だが開発対象外の未知ページ"},
-        {"ページ番号": 22, "選定理由": "過去にFAILEDが出た品質リスクページ"},
         {"ページ番号": 31, "選定理由": "末尾ページの構造差とOCR安定性を確認"},
     ]
-    write_csv(OUTPUT_DIR / "PDF31ホールドアウトページ選定.csv", selection_rows)
-    write_csv(OUTPUT_DIR / "PDF31ホールドアウト候補_初回.csv", rows)
+    failed_selection_rows = [
+        {"ページ番号": 22, "選定理由": "OCR品質FAILED検証用。通常検証用recallから分離"},
+    ]
+    write_csv(OUTPUT_DIR / "PDF31通常検証7ページ_ページ選定.csv", selection_rows)
+    write_csv(OUTPUT_DIR / "PDF31通常検証7ページ_初回候補.csv", rows)
+    write_csv(OUTPUT_DIR / "PDF31ページ22_FAILED検証_ページ選定.csv", failed_selection_rows)
+    write_csv(OUTPUT_DIR / "PDF31ページ22_FAILED検証_初回候補.csv", failed_rows)
     result = {
-        "検査": "ホールドアウト初回候補",
-        "selected_pages": ",".join(str(page) for page in HOLDOUT_PAGES),
+        "検査": "通常検証7ページ初回候補",
+        "selected_pages": ",".join(str(page) for page in validation_pages),
         "candidate_count": len(rows),
+        "failed_page22_candidate_count": len(failed_rows),
         "elapsed_seconds": f"{elapsed:.3f}",
         "note": "この候補出力後、ユーザー確認済み正解データが確定するまで検出ルールは変更しない",
     }
+    page22_quality_rows: list[dict[str, Any]] = []
+    for page in failed_pages:
+        quality = _processor.page_quality.get(page - 1)
+        can_output, reasons = final_output_status(
+            findings,
+            _processor.page_quality,
+            _processor.confirmed_pages,
+            _processor.page_review_state,
+        )
+        page22_quality_rows.append(
+            {
+                "ページ番号": page,
+                "OCR品質判定": quality.verdict if quality else "NOT_EVALUATED",
+                "FAILEDページ検出": "YES" if quality and quality.verdict == "FAILED" else "NO",
+                "最終PDF自動出力停止": "YES" if not can_output else "NO",
+                "ユーザー手動確認要求": "YES" if any("FAILED" in reason or "UNREVIEWED" in reason for reason in reasons) else "NO",
+                "完了扱い抑止": "YES" if not can_output else "NO",
+                "候補数": len(failed_rows),
+                "警告理由": quality.warning_reason if quality else "",
+            }
+        )
+    write_csv(OUTPUT_DIR / "PDF31ページ22_OCR品質FAILED検証.csv", page22_quality_rows)
     return result
 
 
@@ -268,20 +310,22 @@ def main() -> None:
     no_truth = scan_without_ground_truth()
     reordered = scan_reordered_pdf()
     scaled = scan_scaled_pdf()
-    holdout = holdout_initial_candidates()
+    validation = validation_initial_candidates()
     summary_rows = [
         {"項目": "混入検査_PASS数", "値": sum(1 for value in audit.values() if value == "PASS"), "備考": f"{len(audit)}項目中"},
         {"項目": "正解CSVなし候補数", "値": no_truth["generated_candidate_count"], "備考": no_truth["result"]},
         {"項目": "順序変更候補数", "値": reordered["generated_candidate_count"], "備考": reordered["result"]},
         {"項目": "95%縮小候補数", "値": scaled["generated_candidate_count"], "備考": scaled["result"]},
-        {"項目": "ホールドアウト初回候補数", "値": holdout["candidate_count"], "備考": holdout["selected_pages"]},
+        {"項目": "通常検証7ページ初回候補数", "値": validation["candidate_count"], "備考": validation["selected_pages"]},
+        {"項目": "ページ22初回候補数", "値": validation["failed_page22_candidate_count"], "備考": "OCR品質FAILED検証用。通常recallから分離"},
     ]
     write_csv(OUTPUT_DIR / "PDF31汎化確認サマリー.csv", summary_rows, ["項目", "値", "備考"])
     print("independence_audit_pass", f"{summary_rows[0]['値']}/{len(audit)}")
     print("candidate_generation_without_ground_truth", no_truth["result"], no_truth["generated_candidate_count"])
     print("reordered_page_test", reordered["result"], reordered["generated_candidate_count"])
     print("layout_95_scale_test", scaled["result"], scaled["generated_candidate_count"])
-    print("holdout_initial_candidate_count", holdout["candidate_count"])
+    print("validation_ocr_eligible_initial_candidate_count", validation["candidate_count"])
+    print("validation_ocr_failed_page22_initial_candidate_count", validation["failed_page22_candidate_count"])
 
 
 if __name__ == "__main__":

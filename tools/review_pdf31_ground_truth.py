@@ -47,6 +47,7 @@ from pdf31_review_fixtures import REPRESENTATIVE_PAGE_SPECS  # noqa: E402
 
 SOURCE = Path("PDFテストデータ２.pdf")
 OUTPUT_DIR = Path("ocr_quality_outputs")
+DATASET_SPLIT_JSON = Path("config/evaluation/pdf31_dataset_split_v1.json")
 STATE_JSON = OUTPUT_DIR / "PDF31代表6ページ_正解レビュー状態.json"
 FINAL_GT_CSV = OUTPUT_DIR / "PDF31代表6ページ_ユーザー確認済み正解データ_v1.csv"
 FINAL_STATUS_CSV = OUTPUT_DIR / "ユーザー確認状態一覧.csv"
@@ -68,6 +69,33 @@ REVIEW_ORDER = {
     STATUS_EXCLUDED: 4,
     STATUS_CONFIRMED: 5,
 }
+DATASET_OUTPUTS = {
+    "development": {
+        "state": "PDF31代表6ページ_正解レビュー状態.json",
+        "final": "PDF31代表6ページ_ユーザー確認済み正解データ_v1.csv",
+        "status": "PDF31代表6ページ_ユーザー確認状態一覧.csv",
+        "excluded": "PDF31代表6ページ_対象外一覧.csv",
+        "report": "PDF31代表6ページ_正解データ確定報告書.txt",
+        "review_image_prefix": "PDF31代表ページ",
+    },
+    "validation": {
+        "state": "PDF31通常検証7ページ_正解レビュー状態.json",
+        "final": "PDF31通常検証7ページ_ユーザー確認済み正解データ_v1.csv",
+        "status": "PDF31通常検証7ページ_ユーザー確認状態一覧.csv",
+        "excluded": "PDF31通常検証7ページ_対象外一覧.csv",
+        "report": "PDF31通常検証7ページ_正解データ確定報告書.txt",
+        "review_image_prefix": "PDF31通常検証ページ",
+    },
+    "failed": {
+        "state": "PDF31ページ22_FAILED検証_正解レビュー状態.json",
+        "final": "PDF31ページ22_FAILED検証_ユーザー確認済み正解データ_v1.csv",
+        "status": "PDF31ページ22_FAILED検証_ユーザー確認状態一覧.csv",
+        "excluded": "PDF31ページ22_FAILED検証_対象外一覧.csv",
+        "report": "PDF31ページ22_FAILED検証_正解データ確定報告書.txt",
+        "review_image_prefix": "PDF31ページ22_FAILED検証",
+    },
+}
+CURRENT_DATASET = "development"
 
 
 @dataclass
@@ -114,8 +142,36 @@ def normalize_text(value: str) -> str:
     return "".join(value.split()).replace("（", "(").replace("）", ")")
 
 
-def default_records() -> list[GroundTruthRecord]:
-    return [
+def load_dataset_split() -> dict[str, Any]:
+    return json.loads(DATASET_SPLIT_JSON.read_text(encoding="utf-8"))
+
+
+def configure_dataset_outputs(dataset: str) -> None:
+    global CURRENT_DATASET, STATE_JSON, FINAL_GT_CSV, FINAL_STATUS_CSV, EXCLUDED_CSV, FINAL_REPORT_TXT
+    if dataset not in DATASET_OUTPUTS:
+        raise ValueError(f"未知のデータセット区分です: {dataset}")
+    CURRENT_DATASET = dataset
+    outputs = DATASET_OUTPUTS[dataset]
+    STATE_JSON = OUTPUT_DIR / outputs["state"]
+    FINAL_GT_CSV = OUTPUT_DIR / outputs["final"]
+    FINAL_STATUS_CSV = OUTPUT_DIR / outputs["status"]
+    EXCLUDED_CSV = OUTPUT_DIR / outputs["excluded"]
+    FINAL_REPORT_TXT = OUTPUT_DIR / outputs["report"]
+
+
+def dataset_pages(dataset: str) -> list[int]:
+    if dataset == "development":
+        return [int(page) for page in load_dataset_split()["development_pages"]]
+    if dataset == "validation":
+        return [int(page) for page in load_dataset_split()["validation_ocr_eligible_pages"]]
+    if dataset == "failed":
+        return [int(page) for page in load_dataset_split()["validation_ocr_failed_pages"]]
+    raise ValueError(dataset)
+
+
+def default_records(dataset: str = "development") -> list[GroundTruthRecord]:
+    if dataset == "development":
+        return [
         GroundTruthRecord(
             truth_id=spec.truth_id,
             page=spec.page,
@@ -134,10 +190,33 @@ def default_records() -> list[GroundTruthRecord]:
             note=spec.note,
         )
         for spec in REPRESENTATIVE_PAGE_SPECS
-    ]
+        ]
+    records: list[GroundTruthRecord] = []
+    for page in dataset_pages(dataset):
+        records.append(
+            GroundTruthRecord(
+                truth_id=f"P{page:02d}-SEED",
+                page=page,
+                occurrence=1,
+                same_info_id=f"P{page:02d}-SEED",
+                text="",
+                entity_type="未設定",
+                mode="常時",
+                reason="検証用ページ確認プレースホルダー",
+                required="未設定",
+                rect=[80.0, 120.0, 220.0, 150.0],
+                replacement="",
+                preserve="",
+                protected_area="",
+                user_status=STATUS_HOLD,
+                note="初回候補0件のBaseline v1レビュー開始用。必要な正解矩形を手動追加してください。",
+                source="dataset_placeholder",
+            )
+        )
+    return records
 
 
-def load_state(path: Path | None = None, source_pdf: Path = SOURCE) -> ReviewState:
+def load_state(path: Path | None = None, source_pdf: Path = SOURCE, dataset: str = "development") -> ReviewState:
     path = path or STATE_JSON
     source_hash = sha256_file(source_pdf)
     if path.exists():
@@ -162,7 +241,7 @@ def load_state(path: Path | None = None, source_pdf: Path = SOURCE) -> ReviewSta
         source_sha256=source_hash,
         reviewer=os.environ.get("USERNAME", ""),
         last_truth_id="",
-        records=default_records(),
+        records=default_records(dataset),
     )
 
 
@@ -248,6 +327,7 @@ def write_records_csv(path: Path, records: list[GroundTruthRecord]) -> None:
 
 def write_final_review_images(source_pdf: Path, records: list[GroundTruthRecord]) -> list[Path]:
     paths: list[Path] = []
+    prefix = DATASET_OUTPUTS[CURRENT_DATASET]["review_image_prefix"]
     doc = fitz.open(source_pdf)
     try:
         for page in sorted({record.page for record in records}):
@@ -260,7 +340,7 @@ def write_final_review_images(source_pdf: Path, records: list[GroundTruthRecord]
                 shape.finish(color=color, width=1.4)
                 page_obj.insert_text(fitz.Point(rect.x0, max(rect.y0 - 2, 8)), record.truth_id, fontsize=6.5, color=color)
             shape.commit()
-            output = OUTPUT_DIR / f"PDF31代表ページ_{page}_正解枠確認_v1.png"
+            output = OUTPUT_DIR / f"{prefix}_{page}_正解枠確認_v1.png"
             page_obj.get_pixmap(dpi=144, alpha=False).save(output)
             paths.append(output)
     finally:
@@ -271,8 +351,10 @@ def write_final_review_images(source_pdf: Path, records: list[GroundTruthRecord]
 def completion_errors(records: list[GroundTruthRecord]) -> list[str]:
     counts = status_counts(records)
     errors: list[str] = []
-    if len(records) != 49:
+    if CURRENT_DATASET == "development" and len(records) != 49:
         errors.append(f"状態別件数の合計が49件ではありません: {len(records)}")
+    if CURRENT_DATASET != "development" and not records:
+        errors.append("正解候補レコードがありません。")
     if counts.get(STATUS_NEEDS_COORD, 0):
         errors.append(f"要座標修正が残っています: {counts[STATUS_NEEDS_COORD]}件")
     if counts.get(STATUS_PENDING, 0):
@@ -803,7 +885,7 @@ class GroundTruthReviewDialog(QDialog):
 
 
 def command_check() -> int:
-    state = load_state()
+    state = load_state(dataset=CURRENT_DATASET)
     counts = status_counts(state.records)
     save_state(state)
     print(f"state_json={STATE_JSON}")
@@ -819,7 +901,7 @@ def command_check() -> int:
 
 
 def command_finalize(reviewer: str) -> int:
-    state = load_state()
+    state = load_state(dataset=CURRENT_DATASET)
     try:
         finalize_outputs(state, reviewer or state.reviewer or os.environ.get("USERNAME", ""), SOURCE)
     except Exception as exc:
@@ -833,7 +915,7 @@ def command_finalize(reviewer: str) -> int:
 
 
 def command_gui() -> int:
-    state = load_state()
+    state = load_state(dataset=CURRENT_DATASET)
     app = QApplication(sys.argv)
     dialog = GroundTruthReviewDialog(state)
     dialog.show()
@@ -841,11 +923,18 @@ def command_gui() -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="PDF31代表6ページの正解データ確認ツール")
+    parser = argparse.ArgumentParser(description="PDF31正解データ確認ツール")
+    parser.add_argument(
+        "--dataset",
+        choices=("development", "validation", "failed"),
+        default="development",
+        help="development=代表6ページ、validation=通常検証7ページ、failed=ページ22",
+    )
     parser.add_argument("--check", action="store_true", help="現在のレビュー状態を確認し、JSONがなければ初期化する")
     parser.add_argument("--finalize", action="store_true", help="完了条件を満たす場合だけ正式版を出力する")
     parser.add_argument("--reviewer", default=os.environ.get("USERNAME", ""), help="確認者名")
     args = parser.parse_args()
+    configure_dataset_outputs(args.dataset)
     if args.check:
         return command_check()
     if args.finalize:

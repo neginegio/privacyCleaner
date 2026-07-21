@@ -1,0 +1,23 @@
+項目,値,備考
+baseline_name,PDF anonymization detection Baseline v1,
+dataset_version,pdf31_dataset_split_v1,
+baseline_source_commit,adf1fa3,
+development_pages,"5,6,10,11,13,15",
+validation_ocr_eligible_pages,"1,2,3,7,8,16,31",
+validation_ocr_failed_pages,22,通常検証用recallから分離
+final_test_pages,"4,9,12,14,17,18,19,20,21,23,24,25,26,27,28,29,30",
+formal_evaluation_count,49,代表6ページ確定版v1に対する評価母数
+detected_count,0,
+missed_count,49,
+false_positive_count,0,
+average_coverage,0.000,
+candidate_generation_without_ground_truth_count,0,
+reordered_page_generated_candidate_count,0,
+layout_95_percent_generated_candidate_count,0,
+validation_ocr_eligible_initial_candidate_count,0,
+validation_ocr_failed_page22_initial_candidate_count,0,
+independence_audit_pass,6,
+independence_audit_total,6,
+practicality_judgement,Not practical for automatic PDF anonymization yet,
+future_policy,Use Baseline v1 as the starting point for future detection-rule improvements,
+leakage_note,以前の49件一致は汎化性能評価には使用しない,
