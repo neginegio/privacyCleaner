@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from statistics import median
 from typing import Any, Iterable
 
 from .pdf_ocr_support import CANDIDATE_REVIEW, OcrCandidate
@@ -123,6 +124,17 @@ _NON_TARGET_SUMMARY_WORDS = (
     "構成比",
     "単位",
     "年度",
+)
+
+_BUSINESS_PROCESS_WORDS = (
+    "製品企画",
+    "製品設計",
+    "仕上げ",
+    "鋼材仕入",
+    "部品仕入",
+    "塗料仕入",
+    "物流",
+    "納品",
 )
 
 _NON_VALUE_CONTEXT_WORDS = (
@@ -265,11 +277,10 @@ def _visual_rows(lines: list[_LineBox]) -> list[_LineBox]:
     for line in sorted(lines, key=lambda item: (item.y0, item.x0)):
         placed = False
         for row in rows:
-            row_y0 = min(item.y0 for item in row)
-            row_y1 = max(item.y1 for item in row)
-            median_height = max((row_y1 - row_y0), 1.0)
-            overlaps = min(row_y1, line.y1) - max(row_y0, line.y0)
-            if overlaps >= -median_height * 0.35:
+            row_center = median(item.cy for item in row)
+            row_height = median(max(item.y1 - item.y0, 1.0) for item in row)
+            line_height = max(line.y1 - line.y0, 1.0)
+            if abs(line.cy - row_center) <= max(row_height, line_height) * 0.55:
                 row.append(line)
                 placed = True
                 break
@@ -343,7 +354,7 @@ def _table_column_candidates(lines: list[_LineBox], page_rect: Any) -> list[OcrC
                 continue
             header_word = matching[0]
             left_boundary, right_boundary = _column_boundaries(headers, header_word, page_rect)
-            rows = _rows_below(lines, header)
+            rows = [*_embedded_rows_below_header(header, header_word), *_rows_below(lines, header)]
             for row in rows:
                 row_words = [word for word in row.words if left_boundary <= word.cx <= right_boundary]
                 if not row_words and entity_type in {"会社名", "住所"}:
@@ -492,7 +503,7 @@ def _header_words(line: _LineBox) -> list[_WordBox]:
 def _column_boundaries(headers: list[_WordBox], header: _WordBox, page_rect: Any) -> tuple[float, float]:
     ordered = sorted(headers, key=lambda item: item.cx)
     index = ordered.index(header)
-    previous_right = float(page_rect.x0)
+    previous_right = max(float(page_rect.x0), header.x0 - max(header.x1 - header.x0, 40) * 2.6)
     next_left = float(page_rect.x1)
     if index > 0:
         previous_right = ordered[index - 1].x1
@@ -507,10 +518,23 @@ def _column_boundaries(headers: list[_WordBox], header: _WordBox, page_rect: Any
     return left, right
 
 
+def _embedded_rows_below_header(header_line: _LineBox, header_word: _WordBox) -> list[_LineBox]:
+    header_height = max(header_word.y1 - header_word.y0, 1.0)
+    embedded_words = [
+        word for word in header_line.words if word.cy > header_word.cy + header_height * 1.3
+    ]
+    if not embedded_words:
+        return []
+    return _visual_rows(_line_boxes(embedded_words))
+
+
 def _rows_below(lines: list[_LineBox], header: _LineBox) -> list[_LineBox]:
     rows: list[_LineBox] = []
+    header_height = max(header.y1 - header.y0, 1.0)
     for line in lines:
-        if line.y0 <= header.y1 + 8:
+        if line is header:
+            continue
+        if line.cy <= header.cy + header_height * 0.40:
             continue
         if line.y0 - header.y1 > 380:
             break
@@ -605,8 +629,18 @@ def _rect_for_words(words: Iterable[_WordBox]) -> tuple[float, float, float, flo
 def _expand_rect(rect: tuple[float, float, float, float], entity_type: str) -> tuple[float, float, float, float]:
     x0, y0, x1, y1 = rect
     height = max(y1 - y0, 1.0)
-    x_padding = height * (0.85 if entity_type == "氏名" else 0.15)
-    y_padding = height * 0.12
+    if entity_type == "氏名":
+        x_padding = height * 0.85
+        y_padding = height * 0.12
+    elif entity_type == "住所":
+        x_padding = height * 0.30
+        y_padding = height * 0.16
+    elif entity_type == "会社名":
+        x_padding = height * 0.20
+        y_padding = height * 0.18
+    else:
+        x_padding = height * 0.15
+        y_padding = height * 0.12
     return (x0 - x_padding, y0 - y_padding, x1 + x_padding, y1 + y_padding)
 
 
@@ -692,6 +726,8 @@ def _looks_like_section_business_candidate(line: _LineBox) -> bool:
     text = line.normalized
     if _has_corporate_marker(text):
         return True
+    if any(word in text for word in _BUSINESS_PROCESS_WORDS):
+        return False
     if _has_fuzzy_corporate_marker(text) and 4 <= len(text) <= 24:
         return True
     bullet_or_short_block = line.text.strip().startswith(("・", "●", "-")) or len(line.words) <= 3
@@ -851,5 +887,72 @@ def _dedupe(candidates: list[OcrCandidate]) -> list[OcrCandidate]:
         if key in seen:
             continue
         seen.add(key)
+        duplicate_index = _find_overlapping_duplicate(deduped, candidate)
+        if duplicate_index is not None:
+            if _candidate_priority(candidate) > _candidate_priority(deduped[duplicate_index]):
+                deduped[duplicate_index] = candidate
+            continue
         deduped.append(candidate)
     return deduped
+
+
+def _find_overlapping_duplicate(candidates: list[OcrCandidate], candidate: OcrCandidate) -> int | None:
+    for index, existing in enumerate(candidates):
+        if existing.entity_type != candidate.entity_type:
+            continue
+        if _rect_overlap_over_smaller(existing.rect, candidate.rect) < 0.78:
+            continue
+        existing_text = existing.normalized
+        candidate_text = candidate.normalized
+        if existing_text in candidate_text or candidate_text in existing_text:
+            return index
+        if _rect_center_distance(existing.rect, candidate.rect) <= max(_rect_height(existing.rect), _rect_height(candidate.rect)):
+            return index
+    return None
+
+
+def _candidate_priority(candidate: OcrCandidate) -> tuple[int, float]:
+    reason = candidate.reason
+    if reason.startswith(RULE_LABEL_VALUE):
+        rule_rank = 4
+    elif reason.startswith(RULE_TABLE_COLUMN):
+        rule_rank = 3
+    elif reason.startswith(RULE_PATTERN):
+        rule_rank = 2
+    elif reason.startswith(RULE_SECTION_BLOCK):
+        rule_rank = 1
+    else:
+        rule_rank = 0
+    return rule_rank, -_rect_area(candidate.rect)
+
+
+def _rect_overlap_over_smaller(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+) -> float:
+    x0 = max(first[0], second[0])
+    y0 = max(first[1], second[1])
+    x1 = min(first[2], second[2])
+    y1 = min(first[3], second[3])
+    overlap = max(x1 - x0, 0.0) * max(y1 - y0, 0.0)
+    smaller = min(_rect_area(first), _rect_area(second))
+    return overlap / max(smaller, 1.0)
+
+
+def _rect_area(rect: tuple[float, float, float, float]) -> float:
+    return max(rect[2] - rect[0], 0.0) * max(rect[3] - rect[1], 0.0)
+
+
+def _rect_height(rect: tuple[float, float, float, float]) -> float:
+    return max(rect[3] - rect[1], 1.0)
+
+
+def _rect_center_distance(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+) -> float:
+    first_cx = (first[0] + first[2]) / 2
+    first_cy = (first[1] + first[3]) / 2
+    second_cx = (second[0] + second[2]) / 2
+    second_cy = (second[1] + second[3]) / 2
+    return ((first_cx - second_cx) ** 2 + (first_cy - second_cy) ** 2) ** 0.5
