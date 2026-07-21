@@ -8,6 +8,21 @@ from typing import Any, Iterable
 from .pdf_ocr_support import CANDIDATE_REVIEW, OcrCandidate
 
 
+RULE_LABEL_VALUE = "label_value"
+RULE_TABLE_COLUMN = "table_column"
+RULE_SECTION_BLOCK = "section_block"
+RULE_PATTERN = "pattern"
+
+DEFAULT_ENABLED_RULES = frozenset(
+    {
+        RULE_LABEL_VALUE,
+        RULE_TABLE_COLUMN,
+        RULE_SECTION_BLOCK,
+        RULE_PATTERN,
+    }
+)
+
+
 @dataclass(frozen=True)
 class _WordBox:
     text: str
@@ -53,6 +68,14 @@ class _LineBox:
     @property
     def y1(self) -> float:
         return self.rect[3]
+
+    @property
+    def cx(self) -> float:
+        return (self.x0 + self.x1) / 2
+
+    @property
+    def cy(self) -> float:
+        return (self.y0 + self.y1) / 2
 
 
 _LABEL_RULES = (
@@ -102,9 +125,50 @@ _NON_TARGET_SUMMARY_WORDS = (
     "年度",
 )
 
-_CORPORATE_MARKER_RE = re.compile(
-    r"(株式会社|有限会社|合同会社|[（(]株[）)]?|[（(]有[）)]?|㈱|㈲|株\)|有\)|[帳幅帥師梯椎常][一-龯ぁ-んァ-ヶーA-Za-z0-9]{2,})"
+_NON_VALUE_CONTEXT_WORDS = (
+    "項目",
+    "摘要",
+    "対象会社",
+    "役職",
+    "続柄",
+    "株式数",
+    "議決権",
+    "面積",
+    "時価",
+    "利用区分",
+    "建物",
+    "敷地",
+    "売上高",
+    "構成比",
+    "年度",
+    "比率",
+    "合計",
 )
+
+_HEADER_OR_LABEL_ONLY_WORDS = (
+    "企業名称",
+    "会社名",
+    "法人名",
+    "商号",
+    "所在地",
+    "住所",
+    "代表者",
+    "代表取締役",
+    "取引銀行",
+    "金融機関",
+    "氏名",
+    "株主",
+    "株主名",
+    "販売先",
+    "仕入先",
+    "外注先",
+    "取引先",
+)
+
+_STRICT_CORPORATE_MARKER_RE = re.compile(
+    r"(株式会社|有限会社|合同会社|[（(]株[）)]?|[（(]有[）)]?|㈱|㈲|株\)|有\))"
+)
+_FUZZY_CORPORATE_MARKER_RE = re.compile(r"[帳幅帥師梯椎常]")
 _ADDRESS_HINT_RE = re.compile(r"(都|道|府|県|市|区|町|村|字|丁目|番|号|-|ー|−|－)")
 _FINANCIAL_RE = re.compile(r"(銀行|信用金庫|信金|金融公庫|公庫|信用組合)")
 _NUMERIC_HEAVY_RE = re.compile(r"^[0-9０-９,.\-ー−－%％①-⑳\s]+$")
@@ -114,6 +178,7 @@ def context_candidates_for_page(
     page_number: int,
     page_rect: Any,
     words: list[tuple[Any, ...]] | None = None,
+    enabled_rules: set[str] | frozenset[str] | None = None,
 ) -> list[OcrCandidate]:
     """Generate generic structure-based OCR candidates.
 
@@ -128,11 +193,16 @@ def context_candidates_for_page(
         return []
     lines = _line_boxes(word_boxes)
     visual_rows = _visual_rows(lines)
+    active_rules = DEFAULT_ENABLED_RULES if enabled_rules is None else frozenset(enabled_rules)
     candidates: list[OcrCandidate] = []
-    candidates.extend(_label_value_candidates(visual_rows, page_rect))
-    candidates.extend(_table_column_candidates(visual_rows, page_rect))
-    candidates.extend(_section_block_candidates(lines, page_rect))
-    candidates.extend(_standalone_pattern_candidates(lines, page_rect))
+    if RULE_LABEL_VALUE in active_rules:
+        candidates.extend(_label_value_candidates(visual_rows, page_rect))
+    if RULE_TABLE_COLUMN in active_rules:
+        candidates.extend(_table_column_candidates(visual_rows, page_rect))
+    if RULE_SECTION_BLOCK in active_rules:
+        candidates.extend(_section_block_candidates(lines, page_rect))
+    if RULE_PATTERN in active_rules:
+        candidates.extend(_standalone_pattern_candidates(lines, page_rect))
     return _dedupe(candidates)
 
 
@@ -239,8 +309,12 @@ def _label_value_candidates(lines: list[_LineBox], page_rect: Any) -> list[OcrCa
             right_words = [word for word in line.words if word.x0 > label_right + 20]
             if not right_words:
                 continue
+            if _looks_like_mixed_table_value(right_words):
+                continue
             value_words = _trim_value_words(right_words, entity_type)
             if not value_words:
+                continue
+            if not _value_length_ok(value_words, entity_type):
                 continue
             candidate = _candidate_from_words(
                 value_words,
@@ -250,6 +324,7 @@ def _label_value_candidates(lines: list[_LineBox], page_rect: Any) -> list[OcrCa
                 rule_name,
                 f"{label}ラベルの右側にある値を{entity_type}候補として検出",
                 referenced_header=label,
+                confidence=_confidence_for(entity_type, has_structure=True, has_format=_has_entity_format(value_words, entity_type)),
             )
             if candidate:
                 candidates.append(candidate)
@@ -276,9 +351,11 @@ def _table_column_candidates(lines: list[_LineBox], page_rect: Any) -> list[OcrC
                 value_words = _trim_value_words(row_words, entity_type)
                 if not value_words:
                     continue
+                if not _value_length_ok(value_words, entity_type):
+                    continue
                 rect_override = None
-                if entity_type == "住所":
-                    rect_override = _clip_rect(_rect_for_words(value_words), (left_boundary, row.y0, right_boundary, row.y1), page_rect)
+                if entity_type in {"会社名", "住所", "氏名", "銀行名"}:
+                    rect_override = _safe_rect((left_boundary, row.y0, right_boundary, row.y1), page_rect)
                 candidate = _candidate_from_words(
                     value_words,
                     page_rect,
@@ -288,6 +365,7 @@ def _table_column_candidates(lines: list[_LineBox], page_rect: Any) -> list[OcrC
                     f"{label}列の下にある行値を{entity_type}候補として検出",
                     referenced_header=label,
                     rect_override=rect_override,
+                    confidence=_confidence_for(entity_type, has_structure=True, has_format=_has_entity_format(value_words, entity_type)),
                 )
                 if candidate:
                     candidates.append(candidate)
@@ -296,42 +374,50 @@ def _table_column_candidates(lines: list[_LineBox], page_rect: Any) -> list[OcrC
 
 def _section_block_candidates(lines: list[_LineBox], page_rect: Any) -> list[OcrCandidate]:
     candidates: list[OcrCandidate] = []
-    active_heading = ""
-    active_until_y = -1.0
-    for line in lines:
-        heading = _section_heading(line)
-        if heading:
-            active_heading = heading
-            active_until_y = line.y1 + 460
-            continue
-        if not active_heading or line.y0 > active_until_y:
-            continue
-        if active_heading in {"役員構成", "株主一覧"}:
-            entity_type = "氏名"
-            replacement = "個人001"
-            rule_name = "section_block:person_list"
-        else:
-            entity_type = "会社名"
-            replacement = "法人001"
-            rule_name = "section_block:business_partner"
-        value_words = _trim_value_words(list(line.words), entity_type)
-        if not value_words:
-            continue
-        if entity_type == "会社名" and not (_has_corporate_marker(line.normalized) or _looks_like_business_name_line(line)):
-            continue
-        if entity_type == "氏名" and not _looks_like_person_row(line):
-            continue
-        candidate = _candidate_from_words(
-            value_words,
-            page_rect,
-            entity_type,
-            replacement,
-            rule_name,
-            f"{active_heading}見出し配下の文字ブロックを{entity_type}候補として検出",
-            referenced_header=active_heading,
-        )
-        if candidate:
-            candidates.append(candidate)
+    heading_lines = [(line, _section_heading(line)) for line in lines if _section_heading(line)]
+    for heading_line, active_heading in heading_lines:
+        zone = _section_zone(heading_line, [line for line, _heading in heading_lines], page_rect)
+        active_until_y = heading_line.y1 + 260
+        for line in lines:
+            if line.y0 <= heading_line.y1 + 4 or line.y0 > active_until_y:
+                continue
+            if _section_heading(line):
+                continue
+            if not _line_in_zone(line, zone):
+                continue
+            if _is_header_or_label_only(line.normalized):
+                continue
+            if _contains_non_value_context(line.normalized):
+                continue
+            if active_heading in {"役員構成", "株主一覧"}:
+                entity_type = "氏名"
+                replacement = "個人001"
+                rule_name = "section_block:person_list"
+            else:
+                entity_type = "会社名"
+                replacement = "法人001"
+                rule_name = "section_block:business_partner"
+            value_words = _trim_value_words(list(line.words), entity_type)
+            if not value_words:
+                continue
+            if not _value_length_ok(value_words, entity_type):
+                continue
+            if entity_type == "会社名" and not _looks_like_section_business_candidate(line):
+                continue
+            if entity_type == "氏名" and not _looks_like_person_row(line):
+                continue
+            candidate = _candidate_from_words(
+                value_words,
+                page_rect,
+                entity_type,
+                replacement,
+                rule_name,
+                f"{active_heading}見出し配下の文字ブロックを{entity_type}候補として検出",
+                referenced_header=active_heading,
+                confidence=_confidence_for(entity_type, has_structure=True, has_format=_has_entity_format(value_words, entity_type)),
+            )
+            if candidate:
+                candidates.append(candidate)
     return candidates
 
 
@@ -340,39 +426,53 @@ def _standalone_pattern_candidates(lines: list[_LineBox], page_rect: Any) -> lis
     for line in lines:
         if _is_noise_or_summary(line.normalized):
             continue
+        if _is_header_or_label_only(line.normalized):
+            continue
         if _has_corporate_marker(line.normalized) and _looks_like_business_name_line(line):
+            value_words = _trim_value_words(list(line.words), "会社名")
+            if not _value_length_ok(value_words, "会社名"):
+                continue
             candidate = _candidate_from_words(
-                _trim_value_words(list(line.words), "会社名"),
+                value_words,
                 page_rect,
                 "会社名",
                 "法人001",
                 "pattern:corporate_marker",
                 "法人表記またはそのOCR揺れを含む文字ブロックを会社名候補として検出",
                 referenced_header="法人表記",
+                confidence=_confidence_for("会社名", has_structure=False, has_format=True),
             )
             if candidate:
                 candidates.append(candidate)
         elif _looks_like_standalone_address(line.normalized):
+            value_words = _trim_value_words(list(line.words), "住所")
+            if not _value_length_ok(value_words, "住所"):
+                continue
             candidate = _candidate_from_words(
-                _trim_value_words(list(line.words), "住所"),
+                value_words,
                 page_rect,
                 "住所",
                 "市区町村まで",
                 "pattern:address",
                 "都道府県、市区町村、字、番地などの住所構成を含む文字ブロックを住所候補として検出",
                 referenced_header="住所構成",
+                confidence=_confidence_for("住所", has_structure=False, has_format=True),
             )
             if candidate:
                 candidates.append(candidate)
         elif _FINANCIAL_RE.search(line.normalized) and line.normalized not in {"取引銀行", "金融機関", "銀行"}:
+            value_words = _trim_value_words(list(line.words), "銀行名")
+            if not _value_length_ok(value_words, "銀行名"):
+                continue
             candidate = _candidate_from_words(
-                _trim_value_words(list(line.words), "銀行名"),
+                value_words,
                 page_rect,
                 "銀行名",
                 "金融機関001",
                 "pattern:financial_institution",
                 "金融機関を示す一般語を含む文字ブロックを銀行名候補として検出",
                 referenced_header="金融機関表記",
+                confidence=_confidence_for("銀行名", has_structure=False, has_format=True),
             )
             if candidate:
                 candidates.append(candidate)
@@ -384,7 +484,7 @@ def _header_words(line: _LineBox) -> list[_WordBox]:
     for word in line.words:
         if any(label in word.normalized for label, *_rest in _TABLE_HEADER_RULES):
             headers.append(word)
-        elif re.search(r"(No|種類|区分|面積|評価|金額|比率|年度|株式数|議決権)", word.normalized, re.IGNORECASE):
+        elif re.search(r"(No|種類|区分|面積|評価|金額|比率|年度|年.*月.*期|株式数|議決権)", word.normalized, re.IGNORECASE):
             headers.append(word)
     return sorted(headers, key=lambda item: item.cx)
 
@@ -443,6 +543,10 @@ def _trim_value_words(words: list[_WordBox], entity_type: str) -> list[_WordBox]
     normalized = _normalize("".join(word.normalized for word in words))
     if _is_noise_or_summary(normalized):
         return []
+    if _is_header_or_label_only(normalized):
+        return []
+    if _contains_non_value_context(normalized):
+        return []
     if entity_type == "会社名" and not (_has_corporate_marker(normalized) or _looks_like_company_text(normalized)):
         return []
     if entity_type == "住所" and not _looks_like_address(normalized):
@@ -463,6 +567,7 @@ def _candidate_from_words(
     reason: str,
     referenced_header: str,
     rect_override: tuple[float, float, float, float] | None = None,
+    confidence: str = "MEDIUM",
 ) -> OcrCandidate | None:
     word_list = list(words)
     if not word_list:
@@ -483,7 +588,7 @@ def _candidate_from_words(
         status=CANDIDATE_REVIEW,
         replacement=replacement,
         rect=rect,
-        reason=f"{rule_name}: {reason}。参照見出し/列={referenced_header}。信頼度=0.60",
+        reason=f"{rule_name}: {reason}。参照見出し/列={referenced_header}。信頼度={confidence}",
     )
 
 
@@ -532,8 +637,45 @@ def _section_heading(line: _LineBox) -> str:
     return ""
 
 
+def _section_zone(
+    heading: _LineBox,
+    headings: list[_LineBox],
+    page_rect: Any,
+) -> tuple[float, float]:
+    same_band = [
+        item
+        for item in headings
+        if item is not heading and abs(item.cy - heading.cy) <= max(heading.y1 - heading.y0, 1.0) * 3.0
+    ]
+    left = float(page_rect.x0)
+    right = float(page_rect.x1)
+    left_neighbors = [item for item in same_band if item.cx < heading.cx]
+    right_neighbors = [item for item in same_band if item.cx > heading.cx]
+    if left_neighbors:
+        left = (max(item.cx for item in left_neighbors) + heading.cx) / 2
+    else:
+        left = max(float(page_rect.x0), heading.cx - 150)
+    if right_neighbors:
+        right = (min(item.cx for item in right_neighbors) + heading.cx) / 2
+    else:
+        right = min(float(page_rect.x1), heading.cx + 150)
+    return left, right
+
+
+def _line_in_zone(line: _LineBox, zone: tuple[float, float]) -> bool:
+    left, right = zone
+    overlap = min(line.x1, right) - max(line.x0, left)
+    if overlap <= 0:
+        return False
+    return overlap / max(line.x1 - line.x0, 1.0) >= 0.45 or left <= line.cx <= right
+
+
 def _has_corporate_marker(value: str) -> bool:
-    return bool(_CORPORATE_MARKER_RE.search(value))
+    return bool(_STRICT_CORPORATE_MARKER_RE.search(value))
+
+
+def _has_fuzzy_corporate_marker(value: str) -> bool:
+    return bool(_FUZZY_CORPORATE_MARKER_RE.search(value))
 
 
 def _looks_like_business_name_line(line: _LineBox) -> bool:
@@ -546,10 +688,23 @@ def _looks_like_business_name_line(line: _LineBox) -> bool:
     return japanese >= 3 and len(text) <= 28 and not _NUMERIC_HEAVY_RE.match(text)
 
 
+def _looks_like_section_business_candidate(line: _LineBox) -> bool:
+    text = line.normalized
+    if _has_corporate_marker(text):
+        return True
+    if _has_fuzzy_corporate_marker(text) and 4 <= len(text) <= 24:
+        return True
+    bullet_or_short_block = line.text.strip().startswith(("・", "●", "-")) or len(line.words) <= 3
+    japanese = sum(1 for char in text if _is_japanese(char))
+    return bullet_or_short_block and 4 <= japanese <= 18 and not _NUMERIC_HEAVY_RE.match(text)
+
+
 def _looks_like_company_text(value: str) -> bool:
     if _is_noise_or_summary(value):
         return False
     if _has_corporate_marker(value):
+        return True
+    if _has_fuzzy_corporate_marker(value) and 4 <= len(value) <= 24:
         return True
     japanese = sum(1 for char in value if _is_japanese(char))
     return 3 <= japanese <= 24 and not _NUMERIC_HEAVY_RE.match(value)
@@ -579,6 +734,68 @@ def _looks_like_person_text(value: str) -> bool:
         return False
     japanese = sum(1 for char in value if _is_japanese(char))
     return 2 <= japanese <= 8 and not _NUMERIC_HEAVY_RE.match(value)
+
+
+def _has_entity_format(words: list[_WordBox], entity_type: str) -> bool:
+    value = _normalize("".join(word.normalized for word in words))
+    if entity_type == "会社名":
+        return _has_corporate_marker(value) or _has_fuzzy_corporate_marker(value)
+    if entity_type == "住所":
+        return _looks_like_address(value)
+    if entity_type == "銀行名":
+        return bool(_FINANCIAL_RE.search(value))
+    if entity_type == "氏名":
+        return _looks_like_person_text(value)
+    return False
+
+
+def _confidence_for(entity_type: str, *, has_structure: bool, has_format: bool) -> str:
+    if has_structure and has_format:
+        return "HIGH"
+    if has_structure:
+        return "MEDIUM"
+    if has_format and entity_type in {"住所", "銀行名", "会社名"}:
+        return "LOW"
+    return "LOW"
+
+
+def _value_length_ok(words: list[_WordBox], entity_type: str) -> bool:
+    if not words:
+        return False
+    value = _normalize("".join(word.normalized for word in words))
+    if entity_type == "氏名":
+        return 2 <= len(value) <= 10
+    if entity_type == "会社名":
+        return 4 <= len(value) <= 36
+    if entity_type == "銀行名":
+        return 3 <= len(value) <= 40
+    if entity_type == "住所":
+        return 6 <= len(value) <= 80
+    return True
+
+
+def _looks_like_mixed_table_value(words: list[_WordBox]) -> bool:
+    value = _normalize("".join(word.normalized for word in words))
+    if len(value) > 90:
+        return True
+    context_hits = sum(1 for token in _NON_VALUE_CONTEXT_WORDS if token in value)
+    return context_hits >= 2
+
+
+def _is_header_or_label_only(value: str) -> bool:
+    if not value:
+        return True
+    stripped = value.strip(" :：|/・-ー−－")
+    if stripped in _HEADER_OR_LABEL_ONLY_WORDS:
+        return True
+    if len(stripped) <= 6 and any(word == stripped for word in _NON_VALUE_CONTEXT_WORDS):
+        return True
+    return False
+
+
+def _contains_non_value_context(value: str) -> bool:
+    context_hits = sum(1 for token in _NON_VALUE_CONTEXT_WORDS if token in value)
+    return context_hits >= 2
 
 
 def _is_noise_or_summary(value: str) -> bool:
