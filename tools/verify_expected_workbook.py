@@ -8,6 +8,8 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 from excel_privacy_cleaner.excel_processor import ExcelPrivacyProcessor, ProcessingOptions
 
 

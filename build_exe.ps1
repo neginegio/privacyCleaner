@@ -18,6 +18,7 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
     --icon .\assets\app_icon.ico `
     --add-data "assets\app_icon.ico;assets" `
     --add-data "assets\app_icon.png;assets" `
+    --add-data "resources\tessdata;resources\tessdata" `
     --paths .\src `
     .\native_main.py
 

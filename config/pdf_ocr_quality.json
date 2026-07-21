@@ -1,0 +1,10 @@
+{
+  "min_ocr_chars_pass": 40,
+  "min_ocr_chars_review": 10,
+  "max_garble_ratio_pass": 0.08,
+  "max_garble_ratio_review": 0.18,
+  "min_text_area_ratio_pass": 0.0005,
+  "min_text_area_ratio_review": 0.0001,
+  "candidate_free_review_chars": 80,
+  "visual_dark_ratio_threshold": 0.001
+}

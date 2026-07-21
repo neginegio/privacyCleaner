@@ -1,0 +1,20 @@
+Third Party Notices
+===================
+
+Tesseract tessdata
+------------------
+
+Files:
+- resources/tessdata/jpn.traineddata
+- resources/tessdata/eng.traineddata
+- resources/tessdata/osd.traineddata
+
+Source:
+- https://github.com/tesseract-ocr/tessdata
+
+License:
+- Apache License 2.0
+
+Notes:
+- These files are used locally by PyMuPDF OCR. The application does not send
+  source documents to external cloud services or external APIs for OCR.

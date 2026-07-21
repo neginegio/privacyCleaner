@@ -9,3 +9,9 @@ dist/
 *_検出結果_20*.csv
 *_検出変換結果.csv
 *_処理報告書.txt
+config/.privacy_cleaner_state_hmac.key
+ocr_quality_outputs/
+pdf_ocr_test_outputs/
+*.pdf
+*.log
+ocr_check_result.txt
