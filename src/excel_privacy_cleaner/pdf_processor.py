@@ -58,6 +58,12 @@ PDF_REDACTION_MODES = {
     "delete": "完全削除",
 }
 
+PDF_ASSISTANCE_NOTICE = (
+    "PDF OCR匿名化は完全自動匿名化ではなく、全ページ確認前提の支援機能です。"
+    "未確認ページ、未確認候補、OCR不能またはFAILED未対応ページ、検証失敗ページが残っている場合は、"
+    "匿名化済みPDFとして最終出力できません。"
+)
+
 OCR_LANGUAGE = "jpn+eng"
 OCR_DPI = 300
 OCR_MIN_TEXT_CHARS = 20
@@ -76,6 +82,8 @@ class PdfConversionResult:
     ocr_success_pages: tuple[int, ...] = ()
     ocr_failed_pages: tuple[str, ...] = ()
     failed_pages: tuple[int, ...] = ()
+    page_review_state_counts: tuple[tuple[str, int], ...] = ()
+    page_verification_state_counts: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -204,7 +212,7 @@ class PdfPrivacyProcessor:
                     try:
                         ocr_text, ocr_words = ocr_page_text_and_words(page)
                         ocr_candidates = detect_ocr_candidates(ocr_words, page.rect)
-                        ocr_candidates.extend(context_candidates_for_page(page_index + 1, page.rect))
+                        ocr_candidates.extend(context_candidates_for_page(page_index + 1, page.rect, ocr_words))
                         self.page_quality[page_index] = evaluate_page_quality(page, ocr_text, ocr_words, ocr_candidates)
                         self._initialize_page_state(page_index)
                         for candidate in ocr_candidates:
@@ -299,7 +307,12 @@ class PdfPrivacyProcessor:
             self.page_review_state,
         )
         if not can_output:
-            raise RuntimeError("PDFを匿名化済み最終ファイルとして出力できません: " + " / ".join(block_reasons))
+            raise RuntimeError(
+                "PDFを匿名化済み最終ファイルとして出力できません。"
+                + PDF_ASSISTANCE_NOTICE
+                + " 未完了理由: "
+                + " / ".join(block_reasons)
+            )
 
         selected = [finding for finding in findings if finding.enabled]
         if not selected:
@@ -382,6 +395,8 @@ class PdfPrivacyProcessor:
                 f"ページ{page_index + 1}: {reason}" for page_index, reason in sorted(self.ocr_failed_pages.items())
             ),
             failed_pages=tuple(quality.page_number for quality in self.page_quality.values() if quality.verdict == QUALITY_FAILED),
+            page_review_state_counts=tuple(sorted(_count_values(self.page_review_state).items())),
+            page_verification_state_counts=tuple(sorted(_count_values(self.page_verification_state).items())),
         )
         if write_artifacts:
             write_pdf_findings_csv(csv_path, findings)
@@ -810,12 +825,26 @@ def write_pdf_processing_report(
     sanitize_notes: list[str],
 ) -> None:
     converted = [finding for finding in findings if finding.enabled]
+    unresolved_review = [finding for finding in findings if finding.detection_kind in {"確認候補", CANDIDATE_REVIEW}]
     lines = [
         "PDF匿名化 処理報告書",
+        "運用区分: 全ページ確認前提のPDF匿名化支援機能",
+        "完全自動匿名化: いいえ",
+        f"運用上の注意: {PDF_ASSISTANCE_NOTICE}",
         f"入力ファイル名: {source_path.name}",
         f"出力ファイル名: {result.pdf_path.name}",
         f"処理日時: {datetime.now():%Y-%m-%d %H:%M:%S}",
         f"ページ数: {result.page_count}",
+        "最終出力条件: 全ページ確認済み、未確認候補0件、FAILED未対応0件、検証失敗0件",
+        "最終出力判定: 出力可能",
+        "ページ確認状態: "
+        + (" / ".join(f"{state}={count}" for state, count in result.page_review_state_counts) if result.page_review_state_counts else "記録なし"),
+        "ページ検証状態: "
+        + (
+            " / ".join(f"{state}={count}" for state, count in result.page_verification_state_counts)
+            if result.page_verification_state_counts
+            else "記録なし"
+        ),
         f"OCR成功ページ数: {len(result.ocr_success_pages)}",
         f"OCR成功ページ: {', '.join(map(str, result.ocr_success_pages)) if result.ocr_success_pages else 'なし'}",
         f"OCR失敗ページ: {' / '.join(result.ocr_failed_pages) if result.ocr_failed_pages else 'なし'}",
@@ -824,8 +853,9 @@ def write_pdf_processing_report(
         f"検出件数: {len(findings)}",
         f"変換件数: {len(converted)}",
         f"解除件数: {len(findings) - len(converted)}",
-        f"要確認件数: {sum(1 for finding in findings if finding.detection_kind == '確認候補')}",
-        f"検証結果: {'成功' if not validation_warnings else '警告あり'}",
+        f"未確認候補件数: {len(unresolved_review)}",
+        "検証結果区分: " + ("TEXT_RESIDUAL_PASS/MANUAL_REGION_PASS/NOT_EVALUATED" if not validation_warnings else "FAILED"),
+        f"検証結果: {'全ページ確認済みの範囲で成功' if not validation_warnings else '警告あり'}",
         f"サニタイズ結果: {' / '.join(sanitize_notes) if sanitize_notes else '可能な範囲で完了'}",
         "警告内容:",
     ]
@@ -834,6 +864,13 @@ def write_pdf_processing_report(
     else:
         lines.append("- なし")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _count_values(values: dict[int, str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values.values():
+        counts[value] = counts.get(value, 0) + 1
+    return counts
 
 
 def final_output_status(
@@ -845,7 +882,7 @@ def final_output_status(
     reasons: list[str] = []
     unresolved = [finding for finding in findings if finding.detection_kind in {"確認候補", CANDIDATE_REVIEW}]
     if unresolved:
-        reasons.append(f"未確認候補: {len(unresolved)}件")
+        reasons.append(f"未確認候補が残っています: {len(unresolved)}件")
     if page_review_state is None:
         failed_pages = [
             quality.page_number
@@ -853,7 +890,7 @@ def final_output_status(
             if quality.verdict == QUALITY_FAILED and (quality.page_number - 1) not in confirmed_pages
         ]
         if failed_pages:
-            reasons.append(f"未対応のFAILEDページ: {', '.join(map(str, failed_pages))}")
+            reasons.append(f"OCR不能または品質FAILEDの未対応ページ: {', '.join(map(str, failed_pages))}")
         return not reasons, reasons
 
     unreviewed_pages = [
@@ -862,7 +899,7 @@ def final_output_status(
         if page_review_state.get(page_index, PAGE_UNREVIEWED) == PAGE_UNREVIEWED
     ]
     if unreviewed_pages:
-        reasons.append(f"UNREVIEWEDページ: {', '.join(map(str, unreviewed_pages[:20]))}")
+        reasons.append(f"未確認ページがあります: {', '.join(map(str, unreviewed_pages[:20]))}")
 
     review_required_pages = [
         quality.page_number
@@ -870,7 +907,7 @@ def final_output_status(
         if quality.verdict == QUALITY_REVIEW and page_review_state.get(page_index) == PAGE_UNREVIEWED
     ]
     if review_required_pages:
-        reasons.append(f"未対応のREVIEW_REQUIREDページ: {', '.join(map(str, review_required_pages[:20]))}")
+        reasons.append(f"REVIEW_REQUIREDページが未確認です: {', '.join(map(str, review_required_pages[:20]))}")
 
     failed_unresolved_pages = [
         page_index + 1
@@ -878,7 +915,7 @@ def final_output_status(
         if state == PAGE_FAILED_UNRESOLVED
     ]
     if failed_unresolved_pages:
-        reasons.append(f"FAILED_UNRESOLVEDページ: {', '.join(map(str, failed_unresolved_pages[:20]))}")
+        reasons.append(f"OCR不能または品質FAILEDの未対応ページ: {', '.join(map(str, failed_unresolved_pages[:20]))}")
 
     verification_failed_pages = [
         page_index + 1
@@ -886,7 +923,7 @@ def final_output_status(
         if state == PAGE_VERIFICATION_FAILED
     ]
     if verification_failed_pages:
-        reasons.append(f"VERIFICATION_FAILEDページ: {', '.join(map(str, verification_failed_pages[:20]))}")
+        reasons.append(f"検証失敗ページがあります: {', '.join(map(str, verification_failed_pages[:20]))}")
 
     invalid_states = [
         f"ページ{page_index + 1}:{state}"

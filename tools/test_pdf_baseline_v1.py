@@ -48,7 +48,7 @@ def main() -> int:
 
     assert context_candidates_for_page(1, object()) == []
     audit = audit_detection_independence()
-    assert len(audit) == 6
+    assert len(audit) >= 9
     assert all(value == "PASS" for value in audit.values())
     print("pdf_baseline_v1_tests=passed")
     return 0

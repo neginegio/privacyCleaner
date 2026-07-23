@@ -14,7 +14,7 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
     --noconfirm `
     --clean `
     --windowed `
-    --name ExcelPrivacyCleanerNativeCsv `
+    --name hosoPrivacyCleaner `
     --icon .\assets\app_icon.ico `
     --add-data "assets\app_icon.ico;assets" `
     --add-data "assets\app_icon.png;assets" `
@@ -26,4 +26,4 @@ if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed with exit code $LASTEXITCODE."
 }
 
-Write-Host "Build complete: dist\ExcelPrivacyCleanerNativeCsv\ExcelPrivacyCleanerNativeCsv.exe"
+Write-Host "Build complete: dist\hosoPrivacyCleaner\hosoPrivacyCleaner.exe"
