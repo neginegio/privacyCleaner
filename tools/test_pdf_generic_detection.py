@@ -33,17 +33,14 @@ def main() -> int:
     assert DEFAULT_ENABLED_RULES, "Generic detection rules must be individually switchable"
     assert {"label_value", "table_column", "section_block", "pattern"}.issubset(DEFAULT_ENABLED_RULES)
     audit = audit_detection_independence()
-    assert len(audit) == 6
+    assert len(audit) >= 9
     assert all(value == "PASS" for value in audit.values())
-    detection_code = (
-        (Path(__file__).resolve().parents[1] / "src" / "excel_privacy_cleaner" / "pdf_context_rules.py").read_text(
-            encoding="utf-8"
-        )
-        + "\n"
-        + (Path(__file__).resolve().parents[1] / "src" / "excel_privacy_cleaner" / "pdf_processor.py").read_text(
-            encoding="utf-8"
-        )
+    context_code = (Path(__file__).resolve().parents[1] / "src" / "excel_privacy_cleaner" / "pdf_context_rules.py").read_text(
+        encoding="utf-8"
     )
+    detection_code = context_code + "\n" + (
+        Path(__file__).resolve().parents[1] / "src" / "excel_privacy_cleaner" / "pdf_processor.py"
+    ).read_text(encoding="utf-8")
     forbidden = [
         "pdf31_dataset_split_v1.json",
         "docs/evaluation_baselines",
@@ -56,6 +53,8 @@ def main() -> int:
     ]
     for token in forbidden:
         assert token not in detection_code, f"Detection code must not reference evaluation data: {token}"
+    for token in ("manual_added", "user_rejected", "confirmation_method"):
+        assert token not in context_code, f"Candidate rules must not reference review/audit outcomes: {token}"
     print("pdf_generic_detection_tests=passed")
     print(f"candidate_count={len(first)}")
     return 0

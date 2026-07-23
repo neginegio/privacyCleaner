@@ -79,6 +79,13 @@ class _LineBox:
         return (self.y0 + self.y1) / 2
 
 
+@dataclass(frozen=True)
+class _DocumentContext:
+    financial_statement: bool = False
+    explanatory_text: bool = False
+    bank_guidance: bool = False
+
+
 _LABEL_RULES = (
     ("企業名称", "会社名", "法人001", "label_value:corporate_name"),
     ("会社名", "会社名", "法人001", "label_value:corporate_name"),
@@ -155,6 +162,10 @@ _NON_VALUE_CONTEXT_WORDS = (
     "年度",
     "比率",
     "合計",
+    "相談",
+    "説明",
+    "制度",
+    "協議会",
 )
 
 _HEADER_OR_LABEL_ONLY_WORDS = (
@@ -175,6 +186,45 @@ _HEADER_OR_LABEL_ONLY_WORDS = (
     "仕入先",
     "外注先",
     "取引先",
+)
+
+_FINANCIAL_STATEMENT_WORDS = (
+    "貸借対照表",
+    "損益計算書",
+    "勘定科目",
+    "資産の部",
+    "負債の部",
+    "純資産",
+    "流動資産",
+    "固定資産",
+    "流動負債",
+    "固定負債",
+    "売上高",
+    "売上原価",
+    "販売費",
+    "営業利益",
+)
+
+_EXPLANATORY_TEXT_WORDS = (
+    "制度",
+    "説明",
+    "相談",
+    "協議会",
+    "設置",
+    "活動",
+    "ご案内",
+    "お問い合わせ",
+    "都道府県",
+    "市区町村",
+)
+
+_BANK_GUIDANCE_WORDS = (
+    "銀行取引",
+    "銀行協会",
+    "相談室",
+    "あっせん",
+    "苦情",
+    "活動",
 )
 
 _STRICT_CORPORATE_MARKER_RE = re.compile(
@@ -205,16 +255,17 @@ def context_candidates_for_page(
         return []
     lines = _line_boxes(word_boxes)
     visual_rows = _visual_rows(lines)
+    context = _document_context(lines)
     active_rules = DEFAULT_ENABLED_RULES if enabled_rules is None else frozenset(enabled_rules)
     candidates: list[OcrCandidate] = []
     if RULE_LABEL_VALUE in active_rules:
-        candidates.extend(_label_value_candidates(visual_rows, page_rect))
+        candidates.extend(_label_value_candidates(visual_rows, page_rect, context))
     if RULE_TABLE_COLUMN in active_rules:
-        candidates.extend(_table_column_candidates(visual_rows, page_rect))
+        candidates.extend(_table_column_candidates(visual_rows, page_rect, context))
     if RULE_SECTION_BLOCK in active_rules:
-        candidates.extend(_section_block_candidates(lines, page_rect))
+        candidates.extend(_section_block_candidates(lines, page_rect, context))
     if RULE_PATTERN in active_rules:
-        candidates.extend(_standalone_pattern_candidates(lines, page_rect))
+        candidates.extend(_standalone_pattern_candidates(lines, page_rect, context))
     return _dedupe(candidates)
 
 
@@ -309,7 +360,19 @@ def _visual_rows(lines: list[_LineBox]) -> list[_LineBox]:
     return visual
 
 
-def _label_value_candidates(lines: list[_LineBox], page_rect: Any) -> list[OcrCandidate]:
+def _document_context(lines: list[_LineBox]) -> _DocumentContext:
+    text = _normalize("".join(line.normalized for line in lines))
+    financial_hits = sum(1 for word in _FINANCIAL_STATEMENT_WORDS if word in text)
+    explanation_hits = sum(1 for word in _EXPLANATORY_TEXT_WORDS if word in text)
+    bank_guidance_hits = sum(1 for word in _BANK_GUIDANCE_WORDS if word in text)
+    return _DocumentContext(
+        financial_statement=financial_hits >= 2,
+        explanatory_text=explanation_hits >= 2,
+        bank_guidance=bank_guidance_hits >= 2,
+    )
+
+
+def _label_value_candidates(lines: list[_LineBox], page_rect: Any, context: _DocumentContext) -> list[OcrCandidate]:
     candidates: list[OcrCandidate] = []
     for line in lines:
         for label, entity_type, replacement, rule_name in _LABEL_RULES:
@@ -318,6 +381,15 @@ def _label_value_candidates(lines: list[_LineBox], page_rect: Any) -> list[OcrCa
             label_words = [word for word in line.words if label in word.normalized or word.normalized in label]
             label_right = max((word.x1 for word in label_words), default=line.x0)
             right_words = [word for word in line.words if word.x0 > label_right + 20]
+            value_source = f"{label}ラベルの右側にある値を{entity_type}候補として検出"
+            referenced_header = label
+            rect_override = None
+            join_info = ""
+            if not right_words:
+                right_words = _value_words_below_label(lines, line, label_words, entity_type)
+                value_source = f"{label}ラベルの直下にある値を{entity_type}候補として検出"
+                rect_override = _label_below_value_rect(right_words, line, page_rect) if right_words else None
+                join_info = _join_info(right_words, "ラベル直下の近接OCR行") if right_words else ""
             if not right_words:
                 continue
             if _looks_like_mixed_table_value(right_words):
@@ -327,22 +399,135 @@ def _label_value_candidates(lines: list[_LineBox], page_rect: Any) -> list[OcrCa
                 continue
             if not _value_length_ok(value_words, entity_type):
                 continue
+            if _should_suppress_candidate(value_words, entity_type, context, has_structure=True):
+                continue
             candidate = _candidate_from_words(
                 value_words,
                 page_rect,
                 entity_type,
                 replacement,
                 rule_name,
-                f"{label}ラベルの右側にある値を{entity_type}候補として検出",
-                referenced_header=label,
+                value_source,
+                referenced_header=referenced_header,
+                rect_override=rect_override,
                 confidence=_confidence_for(entity_type, has_structure=True, has_format=_has_entity_format(value_words, entity_type)),
+                join_info=join_info,
             )
             if candidate:
                 candidates.append(candidate)
     return candidates
 
 
-def _table_column_candidates(lines: list[_LineBox], page_rect: Any) -> list[OcrCandidate]:
+def _value_words_below_label(
+    lines: list[_LineBox],
+    label_line: _LineBox,
+    label_words: list[_WordBox],
+    entity_type: str,
+) -> list[_WordBox]:
+    if not label_words:
+        return []
+    label_left = min(word.x0 for word in label_words)
+    label_right = max(word.x1 for word in label_words)
+    label_width = max(label_right - label_left, 1.0)
+    candidates: list[_WordBox] = []
+    for row in lines:
+        if row.y0 <= label_line.y1:
+            continue
+        gap = row.y0 - label_line.y1
+        row_height = max(row.y1 - row.y0, 1.0)
+        if gap > row_height * 3.0:
+            break
+        if _section_heading(row) or _is_header_or_label_only(row.normalized):
+            break
+        if _contains_non_value_context(row.normalized):
+            continue
+        aligned = abs(row.x0 - label_left) <= max(label_width, row_height * 4.0)
+        overlaps = row.x0 <= label_right + label_width and row.x1 >= label_left - label_width
+        if not (aligned or overlaps):
+            continue
+        row_words = _trim_value_words(list(row.words), entity_type)
+        if not row_words:
+            continue
+        value = _normalize("".join(word.normalized for word in row_words))
+        if entity_type == "会社名" and not _looks_like_company_text(value):
+            continue
+        if entity_type == "住所" and not _looks_like_address(value):
+            continue
+        if entity_type == "氏名" and not _looks_like_person_text(value):
+            continue
+        if entity_type == "銀行名" and not _looks_like_financial_institution_name(value):
+            continue
+        candidates.extend(row_words)
+        break
+    return candidates
+
+
+def _column_value_rows(
+    lines: list[_LineBox],
+    header: _LineBox,
+    header_word: _WordBox,
+    left_boundary: float,
+    right_boundary: float,
+    entity_type: str,
+    page_rect: Any,
+) -> list[tuple[_LineBox, list[_WordBox], str]]:
+    base_rows = [*_embedded_rows_below_header(header, header_word), *_rows_below(lines, header)]
+    results: list[tuple[_LineBox, list[_WordBox], str]] = []
+    consumed: set[int] = set()
+    row_infos: list[tuple[int, _LineBox, list[_WordBox]]] = []
+    for index, row in enumerate(base_rows):
+        row_words = [word for word in row.words if left_boundary <= word.cx <= right_boundary]
+        if not row_words and entity_type in {"会社名", "住所"}:
+            row_words = [word for word in row.words if word.x0 < right_boundary and word.x1 > left_boundary]
+        row_infos.append((index, row, row_words))
+
+    for index, row, row_words in row_infos:
+        if index in consumed:
+            continue
+        if not row_words:
+            continue
+        group_rows = [(row, row_words)]
+        consumed.add(index)
+        current_rect = _rect_for_words(row_words)
+        if entity_type == "氏名":
+            combined_row = _line_from_words(row_words, row.line)
+            results.append((combined_row, row_words, "単一表行"))
+            continue
+        for next_index, next_row, next_words in row_infos[index + 1 : index + 4]:
+            if next_index in consumed:
+                continue
+            if not next_words:
+                continue
+            if _section_heading(next_row):
+                break
+            gap = next_row.y0 - current_rect[3]
+            row_height = max(current_rect[3] - current_rect[1], next_row.y1 - next_row.y0, 1.0)
+            if gap < -row_height * 0.5:
+                continue
+            if gap > row_height * 1.65:
+                break
+            next_rect = _rect_for_words(next_words)
+            horizontal_overlap = _rect_horizontal_overlap_ratio(current_rect, next_rect)
+            same_column = horizontal_overlap >= 0.28 or abs(_rect_center_x(current_rect) - _rect_center_x(next_rect)) <= max(
+                _rect_width(current_rect), _rect_width(next_rect), 1.0
+            ) * 0.55
+            combined_words = [word for _row, words in group_rows for word in words] + next_words
+            if not same_column:
+                continue
+            if not _can_merge_table_words(combined_words, entity_type):
+                continue
+            group_rows.append((next_row, next_words))
+            consumed.add(next_index)
+            current_rect = _rect_for_words(combined_words)
+
+        group_words = [word for _row, words in group_rows for word in words]
+        combined_row = _line_from_words(group_words, row.line)
+        reason = "同一列内の近接OCR行を結合" if len(group_rows) > 1 else "単一表行"
+        results.append((combined_row, group_words, reason))
+    return results
+
+
+def _table_column_candidates(lines: list[_LineBox], page_rect: Any, context: _DocumentContext) -> list[OcrCandidate]:
     candidates: list[OcrCandidate] = []
     for header in lines:
         headers = _header_words(header)
@@ -354,9 +539,8 @@ def _table_column_candidates(lines: list[_LineBox], page_rect: Any) -> list[OcrC
                 continue
             header_word = matching[0]
             left_boundary, right_boundary = _column_boundaries(headers, header_word, page_rect)
-            rows = [*_embedded_rows_below_header(header, header_word), *_rows_below(lines, header)]
-            for row in rows:
-                row_words = [word for word in row.words if left_boundary <= word.cx <= right_boundary]
+            rows = _column_value_rows(lines, header, header_word, left_boundary, right_boundary, entity_type, page_rect)
+            for row, row_words, join_reason in rows:
                 if not row_words and entity_type in {"会社名", "住所"}:
                     row_words = [word for word in row.words if word.x0 < right_boundary and word.x1 > left_boundary]
                 value_words = _trim_value_words(row_words, entity_type)
@@ -364,9 +548,9 @@ def _table_column_candidates(lines: list[_LineBox], page_rect: Any) -> list[OcrC
                     continue
                 if not _value_length_ok(value_words, entity_type):
                     continue
-                rect_override = None
-                if entity_type in {"会社名", "住所", "氏名", "銀行名"}:
-                    rect_override = _safe_rect((left_boundary, row.y0, right_boundary, row.y1), page_rect)
+                if _should_suppress_candidate(value_words, entity_type, context, has_structure=True):
+                    continue
+                rect_override = _bounded_value_rect(value_words, left_boundary, right_boundary, row, page_rect)
                 candidate = _candidate_from_words(
                     value_words,
                     page_rect,
@@ -377,13 +561,102 @@ def _table_column_candidates(lines: list[_LineBox], page_rect: Any) -> list[OcrC
                     referenced_header=label,
                     rect_override=rect_override,
                     confidence=_confidence_for(entity_type, has_structure=True, has_format=_has_entity_format(value_words, entity_type)),
+                    join_info=_join_info(value_words, join_reason),
                 )
                 if candidate:
                     candidates.append(candidate)
     return candidates
 
 
-def _section_block_candidates(lines: list[_LineBox], page_rect: Any) -> list[OcrCandidate]:
+def _fragmented_section_candidates(
+    lines: list[_LineBox],
+    heading_line: _LineBox,
+    active_heading: str,
+    zone: tuple[float, float],
+    active_until_y: float,
+    page_rect: Any,
+    context: _DocumentContext,
+) -> list[OcrCandidate]:
+    if active_heading in {"役員構成", "株主一覧"}:
+        entity_type = "氏名"
+        replacement = "個人001"
+        rule_name = "section_block:person_list"
+    else:
+        entity_type = "会社名"
+        replacement = "法人001"
+        rule_name = "section_block:business_partner"
+
+    zone_lines = [
+        line
+        for line in lines
+        if line.y0 > heading_line.y1 + 4
+        and line.y0 <= active_until_y
+        and not _section_heading(line)
+        and _line_in_zone(line, zone)
+        and not _is_header_or_label_only(line.normalized)
+        and not _contains_non_value_context(line.normalized)
+    ]
+    candidates: list[OcrCandidate] = []
+    used: set[int] = set()
+    for index, line in enumerate(zone_lines):
+        if index in used:
+            continue
+        if entity_type == "会社名" and not _fragment_can_start_business(line):
+            continue
+        if entity_type == "氏名" and not _fragment_can_start_person(line):
+            continue
+        group = [line]
+        used.add(index)
+        current_rect = line.rect
+        for next_index, next_line in enumerate(zone_lines[index + 1 : index + 4], start=index + 1):
+            if next_index in used:
+                continue
+            gap = next_line.y0 - current_rect[3]
+            height = max(_rect_height(current_rect), next_line.y1 - next_line.y0, 1.0)
+            if gap < -height * 0.4:
+                continue
+            if gap > height * 1.45:
+                break
+            if not _fragment_lines_belong_together(group[-1], next_line):
+                continue
+            combined_words = [word for item in group for word in item.words] + list(next_line.words)
+            if not _can_merge_section_words(combined_words, entity_type):
+                continue
+            group.append(next_line)
+            used.add(next_index)
+            current_rect = _rect_for_words(combined_words)
+
+        if len(group) < 2:
+            continue
+        value_words = _trim_value_words([word for item in group for word in item.words], entity_type)
+        if not value_words:
+            continue
+        if not _value_length_ok(value_words, entity_type):
+            continue
+        if _should_suppress_candidate(value_words, entity_type, context, has_structure=True):
+            continue
+        if entity_type == "会社名" and not _looks_like_company_text(_normalize("".join(word.normalized for word in value_words))):
+            continue
+        if entity_type == "氏名" and not _looks_like_person_text(_normalize("".join(word.normalized for word in value_words))):
+            continue
+        candidate = _candidate_from_words(
+            value_words,
+            page_rect,
+            entity_type,
+            replacement,
+            rule_name,
+            f"{active_heading}見出し配下で複数OCRブロックに分割された値を{entity_type}候補として検出",
+            referenced_header=active_heading,
+            rect_override=_section_value_rect(value_words, zone, page_rect, entity_type),
+            confidence=_confidence_for(entity_type, has_structure=True, has_format=_has_entity_format(value_words, entity_type)),
+            join_info=_join_info(value_words, "同一見出しゾーン内の近接ブロックを結合"),
+        )
+        if candidate:
+            candidates.append(candidate)
+    return candidates
+
+
+def _section_block_candidates(lines: list[_LineBox], page_rect: Any, context: _DocumentContext) -> list[OcrCandidate]:
     candidates: list[OcrCandidate] = []
     heading_lines = [(line, _section_heading(line)) for line in lines if _section_heading(line)]
     for heading_line, active_heading in heading_lines:
@@ -413,6 +686,8 @@ def _section_block_candidates(lines: list[_LineBox], page_rect: Any) -> list[Ocr
                 continue
             if not _value_length_ok(value_words, entity_type):
                 continue
+            if _should_suppress_candidate(value_words, entity_type, context, has_structure=True):
+                continue
             if entity_type == "会社名" and not _looks_like_section_business_candidate(line):
                 continue
             if entity_type == "氏名" and not _looks_like_person_row(line):
@@ -425,23 +700,30 @@ def _section_block_candidates(lines: list[_LineBox], page_rect: Any) -> list[Ocr
                 rule_name,
                 f"{active_heading}見出し配下の文字ブロックを{entity_type}候補として検出",
                 referenced_header=active_heading,
+                rect_override=_section_value_rect(value_words, zone, page_rect, entity_type),
                 confidence=_confidence_for(entity_type, has_structure=True, has_format=_has_entity_format(value_words, entity_type)),
+                join_info=_join_info(value_words, "単一OCR行"),
             )
             if candidate:
                 candidates.append(candidate)
+        candidates.extend(_fragmented_section_candidates(lines, heading_line, active_heading, zone, active_until_y, page_rect, context))
     return candidates
 
 
-def _standalone_pattern_candidates(lines: list[_LineBox], page_rect: Any) -> list[OcrCandidate]:
+def _standalone_pattern_candidates(lines: list[_LineBox], page_rect: Any, context: _DocumentContext) -> list[OcrCandidate]:
     candidates: list[OcrCandidate] = []
     for line in lines:
         if _is_noise_or_summary(line.normalized):
             continue
         if _is_header_or_label_only(line.normalized):
             continue
+        if context.financial_statement and not _has_explicit_value_context(line.normalized):
+            continue
         if _has_corporate_marker(line.normalized) and _looks_like_business_name_line(line):
             value_words = _trim_value_words(list(line.words), "会社名")
             if not _value_length_ok(value_words, "会社名"):
+                continue
+            if _should_suppress_candidate(value_words, "会社名", context, has_structure=False):
                 continue
             candidate = _candidate_from_words(
                 value_words,
@@ -459,6 +741,8 @@ def _standalone_pattern_candidates(lines: list[_LineBox], page_rect: Any) -> lis
             value_words = _trim_value_words(list(line.words), "住所")
             if not _value_length_ok(value_words, "住所"):
                 continue
+            if _should_suppress_candidate(value_words, "住所", context, has_structure=False):
+                continue
             candidate = _candidate_from_words(
                 value_words,
                 page_rect,
@@ -471,9 +755,11 @@ def _standalone_pattern_candidates(lines: list[_LineBox], page_rect: Any) -> lis
             )
             if candidate:
                 candidates.append(candidate)
-        elif _FINANCIAL_RE.search(line.normalized) and line.normalized not in {"取引銀行", "金融機関", "銀行"}:
+        elif _looks_like_financial_institution_name(line.normalized):
             value_words = _trim_value_words(list(line.words), "銀行名")
             if not _value_length_ok(value_words, "銀行名"):
+                continue
+            if _should_suppress_candidate(value_words, "銀行名", context, has_structure=False):
                 continue
             candidate = _candidate_from_words(
                 value_words,
@@ -582,6 +868,84 @@ def _trim_value_words(words: list[_WordBox], entity_type: str) -> list[_WordBox]
     return words
 
 
+def _bounded_value_rect(
+    words: list[_WordBox],
+    left_boundary: float,
+    right_boundary: float,
+    row: _LineBox,
+    page_rect: Any,
+) -> tuple[float, float, float, float]:
+    rect = _rect_for_words(words)
+    height = max(rect[3] - rect[1], row.y1 - row.y0, 1.0)
+    x_margin = height * 0.35
+    y_margin = height * 0.20
+    return _safe_rect(
+        (
+            max(left_boundary, rect[0] - x_margin),
+            min(row.y0, rect[1]) - y_margin,
+            min(right_boundary, rect[2] + x_margin),
+            max(row.y1, rect[3]) + y_margin,
+        ),
+        page_rect,
+    )
+
+
+def _label_below_value_rect(
+    words: list[_WordBox],
+    label_line: _LineBox,
+    page_rect: Any,
+) -> tuple[float, float, float, float]:
+    rect = _rect_for_words(words)
+    height = max(_rect_height(rect), label_line.y1 - label_line.y0, 1.0)
+    return _safe_rect(
+        (
+            rect[0] - height * 0.35,
+            rect[1] - height * 0.20,
+            rect[2] + height * 0.35,
+            rect[3] + height * 0.20,
+        ),
+        page_rect,
+    )
+
+
+def _section_value_rect(
+    words: list[_WordBox],
+    zone: tuple[float, float],
+    page_rect: Any,
+    entity_type: str,
+) -> tuple[float, float, float, float]:
+    rect = _rect_for_words(words)
+    height = _rect_height(rect)
+    if entity_type == "会社名":
+        x_margin = height * 0.80
+        y_margin = height * 0.60
+    elif entity_type == "氏名":
+        x_margin = height * 0.75
+        y_margin = height * 0.24
+    else:
+        x_margin = height * 0.25
+        y_margin = height * 0.18
+    left, right = zone
+    return _safe_rect(
+        (
+            max(left, rect[0] - x_margin),
+            rect[1] - y_margin,
+            min(right, rect[2] + x_margin),
+            rect[3] + y_margin,
+        ),
+        page_rect,
+    )
+
+
+def _join_info(words: list[_WordBox], reason: str) -> str:
+    blocks = {word.block for word in words}
+    lines = {(word.block, word.line) for word in words}
+    normalized = _normalize("".join(word.normalized for word in words))
+    rect = _rect_for_words(words)
+    rect_text = ",".join(f"{value:.1f}" for value in rect)
+    return f"結合情報: 元ブロック数={len(blocks)} / 元行数={len(lines)} / 結合理由={reason} / 結合後文字列={normalized} / 結合矩形={rect_text}"
+
+
 def _candidate_from_words(
     words: Iterable[_WordBox],
     page_rect: Any,
@@ -592,6 +956,7 @@ def _candidate_from_words(
     referenced_header: str,
     rect_override: tuple[float, float, float, float] | None = None,
     confidence: str = "MEDIUM",
+    join_info: str = "",
 ) -> OcrCandidate | None:
     word_list = list(words)
     if not word_list:
@@ -612,7 +977,7 @@ def _candidate_from_words(
         status=CANDIDATE_REVIEW,
         replacement=replacement,
         rect=rect,
-        reason=f"{rule_name}: {reason}。参照見出し/列={referenced_header}。信頼度={confidence}",
+        reason=f"{rule_name}: {reason}。参照見出し/列={referenced_header}。信頼度={confidence}" + (f"。{join_info}" if join_info else ""),
     )
 
 
@@ -623,6 +988,18 @@ def _rect_for_words(words: Iterable[_WordBox]) -> tuple[float, float, float, flo
         min(word.y0 for word in word_list),
         max(word.x1 for word in word_list),
         max(word.y1 for word in word_list),
+    )
+
+
+def _line_from_words(words: list[_WordBox], line_index: int = 0) -> _LineBox:
+    ordered = tuple(sorted(words, key=lambda item: (item.y0, item.x0)))
+    return _LineBox(
+        words=ordered,
+        text=" ".join(word.text for word in ordered),
+        normalized=_normalize("".join(word.normalized for word in ordered)),
+        rect=_rect_for_words(ordered),
+        block=ordered[0].block if ordered else 0,
+        line=line_index,
     )
 
 
@@ -704,6 +1081,57 @@ def _line_in_zone(line: _LineBox, zone: tuple[float, float]) -> bool:
     return overlap / max(line.x1 - line.x0, 1.0) >= 0.45 or left <= line.cx <= right
 
 
+def _can_merge_table_words(words: list[_WordBox], entity_type: str) -> bool:
+    value = _normalize("".join(word.normalized for word in words))
+    if len(words) > 8:
+        return False
+    if entity_type == "氏名":
+        return 2 <= sum(1 for char in value if _is_japanese(char)) <= 10 and not _contains_non_value_context(value)
+    if entity_type == "住所":
+        return len(value) <= 80 and _looks_like_address(value)
+    if entity_type == "会社名":
+        return len(value) <= 36 and _looks_like_company_text(value)
+    return len(value) <= 60
+
+
+def _can_merge_section_words(words: list[_WordBox], entity_type: str) -> bool:
+    value = _normalize("".join(word.normalized for word in words))
+    if len(words) > 7 or _contains_non_value_context(value) or _is_noise_or_summary(value):
+        return False
+    if entity_type == "会社名":
+        return 4 <= len(value) <= 30 and _looks_like_company_text(value)
+    if entity_type == "氏名":
+        return 2 <= len(value) <= 10 and _looks_like_person_text(value)
+    return False
+
+
+def _fragment_lines_belong_together(previous: _LineBox, current: _LineBox) -> bool:
+    previous_rect = previous.rect
+    current_rect = current.rect
+    horizontal_overlap = _rect_horizontal_overlap_ratio(previous_rect, current_rect)
+    center_distance = abs(_rect_center_x(previous_rect) - _rect_center_x(current_rect))
+    max_width = max(_rect_width(previous_rect), _rect_width(current_rect), 1.0)
+    return horizontal_overlap >= 0.18 or center_distance <= max_width * 0.75
+
+
+def _fragment_can_start_business(line: _LineBox) -> bool:
+    value = line.normalized
+    if _is_noise_or_summary(value) or _contains_non_value_context(value):
+        return False
+    if any(word in value for word in _BUSINESS_PROCESS_WORDS):
+        return False
+    japanese = sum(1 for char in value if _is_japanese(char))
+    return 1 <= len(line.words) <= 4 and 2 <= japanese <= 18 and not _NUMERIC_HEAVY_RE.match(value)
+
+
+def _fragment_can_start_person(line: _LineBox) -> bool:
+    value = line.normalized
+    if _is_noise_or_summary(value) or _contains_non_value_context(value):
+        return False
+    japanese = sum(1 for char in value if _is_japanese(char))
+    return 1 <= len(line.words) <= 4 and 1 <= japanese <= 8 and not _NUMERIC_HEAVY_RE.match(value)
+
+
 def _has_corporate_marker(value: str) -> bool:
     return bool(_STRICT_CORPORATE_MARKER_RE.search(value))
 
@@ -724,6 +1152,8 @@ def _looks_like_business_name_line(line: _LineBox) -> bool:
 
 def _looks_like_section_business_candidate(line: _LineBox) -> bool:
     text = line.normalized
+    if _looks_like_ocr_artifact_business(text):
+        return False
     if _has_corporate_marker(text):
         return True
     if any(word in text for word in _BUSINESS_PROCESS_WORDS):
@@ -738,16 +1168,20 @@ def _looks_like_section_business_candidate(line: _LineBox) -> bool:
 def _looks_like_company_text(value: str) -> bool:
     if _is_noise_or_summary(value):
         return False
+    if _looks_like_ocr_artifact_business(value):
+        return False
     if _has_corporate_marker(value):
         return True
     if _has_fuzzy_corporate_marker(value) and 4 <= len(value) <= 24:
         return True
     japanese = sum(1 for char in value if _is_japanese(char))
-    return 3 <= japanese <= 24 and not _NUMERIC_HEAVY_RE.match(value)
+    return 3 <= japanese <= 24 and not _NUMERIC_HEAVY_RE.match(value) and not _looks_like_general_sentence(value)
 
 
 def _looks_like_address(value: str) -> bool:
     if _is_noise_or_summary(value):
+        return False
+    if _looks_like_general_sentence(value):
         return False
     return bool(_ADDRESS_HINT_RE.search(value)) and sum(1 for char in value if _is_japanese(char)) >= 3
 
@@ -755,7 +1189,43 @@ def _looks_like_address(value: str) -> bool:
 def _looks_like_standalone_address(value: str) -> bool:
     if not _looks_like_address(value):
         return False
-    return bool(re.search(r"(東京都|北海道|京都府|大阪府|[一-龯]{2,3}県)", value))
+    if any(token in value for token in ("設置", "制度", "説明", "協議会", "相談", "活動")):
+        return False
+    return bool(re.search(r"(東京都|北海道|京都府|大阪府|[一-龯]{2,3}県)", value)) and bool(re.search(r"(市|区|町|村|字|丁目|番|号)", value))
+
+
+def _looks_like_financial_institution_name(value: str) -> bool:
+    if not _FINANCIAL_RE.search(value):
+        return False
+    if value in {"取引銀行", "金融機関", "銀行"}:
+        return False
+    if any(token in value for token in ("相談", "案内", "活動", "取引", "協会", "あっせん", "苦情", "お受け", "知りたい", "委員会")):
+        return False
+    return bool(re.search(r"[一-龯ぁ-んァ-ヶA-Za-z]{2,}(銀行|信用金庫|信金|信用組合|農業協同組合|金融公庫|公庫)", value))
+
+
+def _looks_like_general_sentence(value: str) -> bool:
+    if len(value) < 18:
+        return False
+    sentence_markers = ("です", "ます", "された", "している", "について", "に関する", "の場合", "ため", "こと", "もの", "こちら", "ください")
+    return any(marker in value for marker in sentence_markers)
+
+
+def _looks_like_ocr_artifact_business(value: str) -> bool:
+    if _has_corporate_marker(value) or _has_fuzzy_corporate_marker(value):
+        return False
+    japanese = sum(1 for char in value if _is_japanese(char))
+    ascii_alnum = sum(1 for char in value if char.isascii() and char.isalnum())
+    symbols = sum(1 for char in value if not char.isalnum() and not _is_japanese(char))
+    if japanese < 3 and ascii_alnum + symbols >= japanese + 2:
+        return True
+    if symbols >= 4 and japanese < 5:
+        return True
+    return False
+
+
+def _has_explicit_value_context(value: str) -> bool:
+    return any(token in value for token in ("取引銀行", "金融機関", "所在地", "住所", "販売先", "仕入先", "外注先", "会社名", "法人名"))
 
 
 def _looks_like_person_row(line: _LineBox) -> bool:
@@ -779,10 +1249,62 @@ def _has_entity_format(words: list[_WordBox], entity_type: str) -> bool:
     if entity_type == "住所":
         return _looks_like_address(value)
     if entity_type == "銀行名":
-        return bool(_FINANCIAL_RE.search(value))
+        return _looks_like_financial_institution_name(value) or bool(_FINANCIAL_RE.search(value))
     if entity_type == "氏名":
         return _looks_like_person_text(value)
     return False
+
+
+def _should_suppress_candidate(
+    words: list[_WordBox],
+    entity_type: str,
+    context: _DocumentContext,
+    *,
+    has_structure: bool,
+) -> bool:
+    value = _normalize("".join(word.normalized for word in words))
+    if not value:
+        return True
+    if entity_type == "会社名":
+        if context.financial_statement and not has_structure and not _has_corporate_marker(value):
+            return True
+        if _looks_like_accounting_term(value):
+            return True
+        if _looks_like_general_sentence(value) and not _has_corporate_marker(value):
+            return True
+    if entity_type == "住所":
+        if context.explanatory_text and not has_structure:
+            return True
+        if any(token in value for token in ("制度", "協議会", "設置", "説明", "相談")) and not re.search(r"(丁目|番|号|字|[0-9０-９]-)", value):
+            return True
+    if entity_type == "銀行名":
+        if not has_structure and not _looks_like_financial_institution_name(value):
+            return True
+        if context.bank_guidance and any(token in value for token in ("相談", "案内", "協会", "取引", "活動", "あっせん")):
+            return True
+    return False
+
+
+def _looks_like_accounting_term(value: str) -> bool:
+    accounting = (
+        "現金",
+        "預金",
+        "売掛金",
+        "棚卸資産",
+        "有形固定資産",
+        "無形固定資産",
+        "投資",
+        "買掛金",
+        "借入金",
+        "資本金",
+        "利益剰余金",
+        "売上高",
+        "売上原価",
+        "営業利益",
+        "経常利益",
+        "当期純利益",
+    )
+    return any(term in value for term in accounting)
 
 
 def _confidence_for(entity_type: str, *, has_structure: bool, has_format: bool) -> str:
@@ -945,6 +1467,22 @@ def _rect_area(rect: tuple[float, float, float, float]) -> float:
 
 def _rect_height(rect: tuple[float, float, float, float]) -> float:
     return max(rect[3] - rect[1], 1.0)
+
+
+def _rect_width(rect: tuple[float, float, float, float]) -> float:
+    return max(rect[2] - rect[0], 1.0)
+
+
+def _rect_center_x(rect: tuple[float, float, float, float]) -> float:
+    return (rect[0] + rect[2]) / 2
+
+
+def _rect_horizontal_overlap_ratio(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+) -> float:
+    overlap = max(min(first[2], second[2]) - max(first[0], second[0]), 0.0)
+    return overlap / max(min(_rect_width(first), _rect_width(second)), 1.0)
 
 
 def _rect_center_distance(

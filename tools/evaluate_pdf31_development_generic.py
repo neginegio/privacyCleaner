@@ -35,15 +35,22 @@ DEV_CONFIDENCE_SUMMARY_CSV = OUTPUT_DIR / "PDF31開発用6ページ_第2段階_�
 DEV_RULE_ABLATION_CSV = OUTPUT_DIR / "PDF31開発用6ページ_第2段階_ルール停止影響.csv"
 DEV_COMPARISON_CSV = OUTPUT_DIR / "PDF31開発用6ページ_第2段階_改善前後比較.csv"
 DEV_INITIAL_FALSE_POSITIVE_CAUSES_CSV = OUTPUT_DIR / "PDF31開発用6ページ_第2段階_初期誤検出47件分類.csv"
+DEV_METRIC_DEFINITION_CSV = OUTPUT_DIR / "PDF31開発用6ページ_評価指標定義.csv"
+DEV_METRIC_INTEGRITY_CSV = OUTPUT_DIR / "PDF31開発用6ページ_評価指標整合性テスト.csv"
+DEV_MISS_CAUSE_SUMMARY_CSV = OUTPUT_DIR / "PDF31開発用6ページ_第2世代_残存見逃し原因サマリー.csv"
+DEV_MISS_ACTION_SUMMARY_CSV = OUTPUT_DIR / "PDF31開発用6ページ_第2世代_残存見逃し対応分類サマリー.csv"
 
 INITIAL_GENERIC_METRICS = {
+    "ground_truth_count": 49,
     "candidate_count": 57,
-    "detected_count": 10,
-    "missed_count": 39,
-    "false_positive_count": 47,
+    "matched_ground_truth_count": 10,
+    "missed_ground_truth_count": 39,
+    "true_positive_candidate_count": 10,
+    "false_positive_candidate_count": 47,
     "recall": 0.204,
-    "precision": 0.175,
+    "candidate_precision": 0.175,
     "average_coverage": 0.945,
+    "minimum_coverage": 0.864,
 }
 
 INITIAL_FALSE_POSITIVE_CAUSES = [
@@ -238,8 +245,61 @@ def write_truth_classification(truths: list[TruthRect]) -> None:
     write_csv(DEV_TRUTH_CLASSIFICATION_CSV, rows)
 
 
+def write_metric_definitions() -> None:
+    rows = [
+        {"指標": "ground_truth_count", "定義": "正解矩形総数"},
+        {"指標": "candidate_count", "定義": "自動生成された候補総数"},
+        {"指標": "matched_ground_truth_count", "定義": "1つ以上の候補によって検出された正解矩形数"},
+        {"指標": "missed_ground_truth_count", "定義": "検出されなかった正解矩形数"},
+        {"指標": "true_positive_candidate_count", "定義": "1つ以上の正解矩形と有効に一致した候補数"},
+        {"指標": "false_positive_candidate_count", "定義": "正解矩形と一致しなかった候補数"},
+        {"指標": "recall", "定義": "matched_ground_truth_count / ground_truth_count"},
+        {"指標": "candidate_precision", "定義": "true_positive_candidate_count / candidate_count"},
+        {"指標": "average_coverage", "定義": "検出された正解矩形に対する被覆率の平均"},
+        {"指標": "minimum_coverage", "定義": "検出された正解矩形に対する被覆率の最小値"},
+        {
+            "指標": "legacy_ground_truth_per_candidate_ratio",
+            "定義": "旧precision相当。matched_ground_truth_count / candidate_count。1候補が複数正解矩形に一致するとcandidate_precisionより高くなる。",
+        },
+    ]
+    write_csv(DEV_METRIC_DEFINITION_CSV, rows)
+
+
+def write_metric_integrity(metrics: dict[str, Any]) -> None:
+    checks = [
+        {
+            "検査項目": "matched_ground_truth_count + missed_ground_truth_count = ground_truth_count",
+            "判定": "PASS"
+            if metrics["matched_ground_truth_count"] + metrics["missed_ground_truth_count"] == metrics["ground_truth_count"]
+            else "FAIL",
+            "値": f"{metrics['matched_ground_truth_count']} + {metrics['missed_ground_truth_count']} = {metrics['ground_truth_count']}",
+        },
+        {
+            "検査項目": "true_positive_candidate_count + false_positive_candidate_count = candidate_count",
+            "判定": "PASS"
+            if metrics["true_positive_candidate_count"] + metrics["false_positive_candidate_count"] == metrics["candidate_count"]
+            else "FAIL",
+            "値": f"{metrics['true_positive_candidate_count']} + {metrics['false_positive_candidate_count']} = {metrics['candidate_count']}",
+        },
+        {
+            "検査項目": "0 <= recall <= 1",
+            "判定": "PASS" if 0.0 <= metrics["recall"] <= 1.0 else "FAIL",
+            "値": f"{metrics['recall']:.3f}",
+        },
+        {
+            "検査項目": "0 <= candidate_precision <= 1",
+            "判定": "PASS" if 0.0 <= metrics["candidate_precision"] <= 1.0 else "FAIL",
+            "値": f"{metrics['candidate_precision']:.3f}",
+        },
+    ]
+    write_csv(DEV_METRIC_INTEGRITY_CSV, checks)
+    failures = [row for row in checks if row["判定"] != "PASS"]
+    if failures:
+        raise AssertionError(f"metric integrity failed: {failures}")
+
+
 def evaluate(truths: list[TruthRect], candidates: list[CandidateRect]) -> dict[str, Any]:
-    matched_candidate_indexes: set[int] = set()
+    true_positive_candidate_indexes: set[int] = set()
     eval_rows: list[dict[str, Any]] = []
     coverage_values: list[float] = []
     excess_values: list[float] = []
@@ -250,10 +310,11 @@ def evaluate(truths: list[TruthRect], candidates: list[CandidateRect]) -> dict[s
                 continue
             item_coverage = coverage(truth.rect, candidate.rect)
             item_excess = excess_ratio(truth.rect, candidate.rect)
+            if item_coverage >= 0.85:
+                true_positive_candidate_indexes.add(index)
             if item_coverage >= 0.85 and (best is None or item_coverage > best[2]):
                 best = (index, candidate, item_coverage, item_excess)
         if best:
-            matched_candidate_indexes.add(best[0])
             coverage_values.append(best[2])
             excess_values.append(best[3])
         eval_rows.append(
@@ -271,7 +332,7 @@ def evaluate(truths: list[TruthRect], candidates: list[CandidateRect]) -> dict[s
         )
     false_positive_rows: list[dict[str, Any]] = []
     for index, candidate in enumerate(candidates):
-        if index in matched_candidate_indexes:
+        if index in true_positive_candidate_indexes:
             continue
         false_positive_rows.append(
             {
@@ -287,24 +348,33 @@ def evaluate(truths: list[TruthRect], candidates: list[CandidateRect]) -> dict[s
     write_csv(DEV_EVAL_CSV, eval_rows)
     write_csv(OUTPUT_DIR / "PDF31開発用6ページ_汎用候補誤検出一覧.csv", false_positive_rows)
     write_csv(DEV_FALSE_POSITIVE_CLASSIFICATION_CSV, false_positive_rows)
-    detected = sum(1 for row in eval_rows if row["判定"] == "PASS")
-    truth_count = len(truths)
+    matched_ground_truth_count = sum(1 for row in eval_rows if row["判定"] == "PASS")
+    ground_truth_count = len(truths)
     candidate_count = len(candidates)
-    false_positive_count = len(false_positive_rows)
+    true_positive_candidate_count = len(true_positive_candidate_indexes)
+    false_positive_candidate_count = len(false_positive_rows)
     return {
-        "truth_count": truth_count,
+        "ground_truth_count": ground_truth_count,
+        "truth_count": ground_truth_count,
         "candidate_count": candidate_count,
-        "detected_count": detected,
-        "missed_count": truth_count - detected,
-        "false_positive_count": false_positive_count,
-        "recall": detected / truth_count if truth_count else 0.0,
-        "precision": detected / candidate_count if candidate_count else 0.0,
+        "matched_ground_truth_count": matched_ground_truth_count,
+        "detected_count": matched_ground_truth_count,
+        "missed_ground_truth_count": ground_truth_count - matched_ground_truth_count,
+        "missed_count": ground_truth_count - matched_ground_truth_count,
+        "true_positive_candidate_count": true_positive_candidate_count,
+        "false_positive_candidate_count": false_positive_candidate_count,
+        "false_positive_count": false_positive_candidate_count,
+        "recall": matched_ground_truth_count / ground_truth_count if ground_truth_count else 0.0,
+        "candidate_precision": true_positive_candidate_count / candidate_count if candidate_count else 0.0,
+        "legacy_ground_truth_per_candidate_ratio": matched_ground_truth_count / candidate_count if candidate_count else 0.0,
+        "precision": matched_ground_truth_count / candidate_count if candidate_count else 0.0,
         "average_coverage": sum(coverage_values) / len(coverage_values) if coverage_values else 0.0,
         "minimum_coverage": min(coverage_values) if coverage_values else 0.0,
         "average_excess": sum(excess_values) / len(excess_values) if excess_values else 0.0,
         "maximum_excess": max(excess_values) if excess_values else 0.0,
         "eval_rows": eval_rows,
-        "matched_candidate_indexes": matched_candidate_indexes,
+        "matched_candidate_indexes": true_positive_candidate_indexes,
+        "true_positive_candidate_indexes": true_positive_candidate_indexes,
         "false_positive_rows": false_positive_rows,
     }
 
@@ -379,6 +449,12 @@ def classify_misses(
         best_coverage = max((coverage(truth.rect, candidate.rect) for candidate in same_page_entity), default=0.0)
         ocr_text = ocr_text_by_page.get(truth.page, "")
         normalized_truth = normalize_text(truth.original_text)
+        cause_code, cause_detail, action_category = detailed_miss_classification(
+            truth,
+            best_coverage=best_coverage,
+            normalized_truth=normalized_truth,
+            ocr_text=ocr_text,
+        )
         if normalized_truth and normalized_truth not in ocr_text:
             cause = "OCR文字列自体が取得できていない"
         elif best_coverage > 0:
@@ -396,10 +472,104 @@ def classify_misses(
                 "必須度": truth.required,
                 "文書構造": truth.structure,
                 "分類": cause,
+                "原因コード": cause_code,
+                "第2世代原因分類": cause_detail,
+                "対応分類": action_category,
                 "最大被覆率": f"{best_coverage:.3f}",
             }
         )
     return rows
+
+
+def detailed_miss_classification(
+    truth: TruthRect,
+    *,
+    best_coverage: float,
+    normalized_truth: str,
+    ocr_text: str,
+) -> tuple[str, str, str]:
+    if best_coverage > 0:
+        return (
+            "G",
+            "候補は生成されているが矩形一致基準を満たしていない",
+            "候補生成改善で対応可能",
+        )
+    if normalized_truth and normalized_truth not in ocr_text:
+        if truth.entity_type == "氏名":
+            return (
+                "B",
+                "OCR誤認識が大きく、元情報を再構成できない",
+                "OCR改善が必要",
+            )
+        if "写真" in truth.structure:
+            return (
+                "A",
+                "OCR文字自体が存在しない",
+                "OCR改善が必要",
+            )
+        if any(token in truth.structure for token in ("主な仕入先", "外注先", "主な販売先")):
+            return (
+                "C",
+                "文字はあるが複数ブロック分割で安全に結合できない",
+                "安全性を考えると自動検出困難",
+            )
+        if "列" in truth.structure:
+            return (
+                "D",
+                "表の行列対応を認識できない",
+                "候補生成改善で対応可能",
+            )
+        if "説明文" in truth.structure:
+            return (
+                "E",
+                "見出し・ラベルと値の対応を認識できない",
+                "候補生成改善で対応可能",
+            )
+        return (
+            "A",
+            "OCR文字自体が存在しない",
+            "OCR改善が必要",
+        )
+    if "列" in truth.structure:
+        return (
+            "D",
+            "表の行列対応を認識できない",
+            "候補生成改善で対応可能",
+        )
+    if any(token in truth.structure for token in ("説明文", "代表者", "所在地")):
+        return (
+            "E",
+            "見出し・ラベルと値の対応を認識できない",
+            "候補生成改善で対応可能",
+        )
+    if any(token in truth.structure for token in ("主な", "一覧", "構成")):
+        return (
+            "F",
+            "文字列と構造は取得できているが汎用ルール不足",
+            "候補生成改善で対応可能",
+        )
+    return ("H", "その他", "要追加調査")
+
+
+def write_miss_summaries(rows: list[dict[str, Any]]) -> None:
+    cause_counts: dict[tuple[str, str], int] = {}
+    action_counts: dict[str, int] = {}
+    for row in rows:
+        cause_key = (str(row["原因コード"]), str(row["第2世代原因分類"]))
+        cause_counts[cause_key] = cause_counts.get(cause_key, 0) + 1
+        action = str(row["対応分類"])
+        action_counts[action] = action_counts.get(action, 0) + 1
+    write_csv(
+        DEV_MISS_CAUSE_SUMMARY_CSV,
+        [
+            {"原因コード": code, "第2世代原因分類": cause, "件数": count}
+            for (code, cause), count in sorted(cause_counts.items())
+        ],
+    )
+    write_csv(
+        DEV_MISS_ACTION_SUMMARY_CSV,
+        [{"対応分類": action, "件数": count} for action, count in sorted(action_counts.items())],
+    )
 
 
 def extract_ocr_text_by_page(pages: list[int]) -> dict[int, str]:
@@ -431,15 +601,21 @@ def write_candidate_csv(candidates: list[CandidateRect]) -> None:
 
 def write_summaries(truths: list[TruthRect], candidates: list[CandidateRect], metrics: dict[str, Any]) -> None:
     metric_rows = [
-        {"項目": "baseline_truth_count", "値": 49, "備考": "Baseline v1"},
-        {"項目": "baseline_detected_count", "値": 0, "備考": "Baseline v1"},
-        {"項目": "truth_count", "値": metrics["truth_count"], "備考": "開発用6ページ"},
+        {"項目": "baseline_ground_truth_count", "値": 49, "備考": "Baseline v1"},
+        {"項目": "baseline_matched_ground_truth_count", "値": 0, "備考": "Baseline v1"},
+        {"項目": "ground_truth_count", "値": metrics["ground_truth_count"], "備考": "開発用6ページ"},
         {"項目": "candidate_count", "値": metrics["candidate_count"], "備考": ""},
-        {"項目": "detected_count", "値": metrics["detected_count"], "備考": ""},
-        {"項目": "missed_count", "値": metrics["missed_count"], "備考": ""},
-        {"項目": "false_positive_count", "値": metrics["false_positive_count"], "備考": ""},
+        {"項目": "matched_ground_truth_count", "値": metrics["matched_ground_truth_count"], "備考": ""},
+        {"項目": "missed_ground_truth_count", "値": metrics["missed_ground_truth_count"], "備考": ""},
+        {"項目": "true_positive_candidate_count", "値": metrics["true_positive_candidate_count"], "備考": ""},
+        {"項目": "false_positive_candidate_count", "値": metrics["false_positive_candidate_count"], "備考": ""},
         {"項目": "recall", "値": f"{metrics['recall']:.3f}", "備考": ""},
-        {"項目": "precision", "値": f"{metrics['precision']:.3f}", "備考": ""},
+        {"項目": "candidate_precision", "値": f"{metrics['candidate_precision']:.3f}", "備考": ""},
+        {
+            "項目": "legacy_ground_truth_per_candidate_ratio",
+            "値": f"{metrics['legacy_ground_truth_per_candidate_ratio']:.3f}",
+            "備考": "旧precision相当。候補単位precisionではない。",
+        },
         {"項目": "average_coverage", "値": f"{metrics['average_coverage']:.3f}", "備考": ""},
         {"項目": "minimum_coverage", "値": f"{metrics['minimum_coverage']:.3f}", "備考": ""},
         {"項目": "average_excess", "値": f"{metrics['average_excess']:.3f}", "備考": ""},
@@ -455,29 +631,32 @@ def write_summaries(truths: list[TruthRect], candidates: list[CandidateRect], me
         entity_rows.append(
             {
                 "情報種別": entity_type,
-                "正解数": len(truth_subset),
+                "ground_truth_count": len(truth_subset),
                 "候補数": len(candidate_subset),
-                "検出数": len(passed),
-                "見逃し数": len(truth_subset) - len(passed),
+                "matched_ground_truth_count": len(passed),
+                "missed_ground_truth_count": len(truth_subset) - len(passed),
             }
         )
     write_csv(DEV_ENTITY_SUMMARY_CSV, entity_rows)
 
     rule_rows: list[dict[str, Any]] = []
     matched_rules = [row["検出ルール"] for row in metrics["eval_rows"] if row["判定"] == "PASS"]
+    matched_candidate_indexes: set[int] = metrics["matched_candidate_indexes"]
     for rule_name in sorted({candidate.rule_name for candidate in candidates}):
-        rule_candidates = [candidate for candidate in candidates if candidate.rule_name == rule_name]
+        rule_candidate_indexes = [index for index, candidate in enumerate(candidates) if candidate.rule_name == rule_name]
+        rule_candidates = [candidates[index] for index in rule_candidate_indexes]
+        matched_candidate_count = len(set(rule_candidate_indexes) & matched_candidate_indexes)
         rule_rows.append(
             {
                 "検出ルール": rule_name,
                 "候補数": len(rule_candidates),
-                "正解数": matched_rules.count(rule_name),
-                "誤検出数": len(rule_candidates) - matched_rules.count(rule_name),
+                "検出正解矩形数": matched_rules.count(rule_name),
+                "対応候補数": matched_candidate_count,
+                "誤検出数": len(rule_candidates) - matched_candidate_count,
             }
         )
     write_csv(DEV_RULE_SUMMARY_CSV, rule_rows)
 
-    matched_candidate_indexes: set[int] = metrics["matched_candidate_indexes"]
     rule_analysis_rows: list[dict[str, Any]] = []
     false_positive_rows = metrics["false_positive_rows"]
     for rule_name in sorted({candidate.rule_name for candidate in candidates}):
@@ -485,6 +664,7 @@ def write_summaries(truths: list[TruthRect], candidates: list[CandidateRect], me
         rule_false_positive = [row for row in false_positive_rows if row["検出ルール"] == rule_name]
         candidate_indexes = [index for index, candidate in enumerate(candidates) if candidate.rule_name == rule_name]
         detected_by_rule = matched_rules.count(rule_name)
+        matched_candidate_count = len(set(candidate_indexes) & matched_candidate_indexes)
         main_cause = most_common([row["分類"] for row in rule_false_positive])
         action = "維持"
         if rule_false_positive and detected_by_rule == 0:
@@ -495,9 +675,10 @@ def write_summaries(truths: list[TruthRect], candidates: list[CandidateRect], me
             {
                 "検出ルール": rule_name,
                 "候補数": len(rule_candidates),
-                "正解数": detected_by_rule,
+                "検出正解矩形数": detected_by_rule,
+                "対応候補数": matched_candidate_count,
                 "誤検出数": len(rule_false_positive),
-                "precision": f"{detected_by_rule / len(rule_candidates):.3f}" if rule_candidates else "0.000",
+                "precision": f"{matched_candidate_count / len(rule_candidates):.3f}" if rule_candidates else "0.000",
                 "該当ページ数": len({candidate.page for candidate in rule_candidates}),
                 "他ルールとの重複": duplicate_count_for_indexes(candidates, candidate_indexes),
                 "誤検出の主な原因": main_cause,
@@ -532,52 +713,60 @@ def write_summaries(truths: list[TruthRect], candidates: list[CandidateRect], me
             {
                 "停止ルール": rule_name,
                 "候補数": reduced_metrics["candidate_count"],
-                "検出数": reduced_metrics["detected_count"],
-                "見逃し数": reduced_metrics["missed_count"],
-                "誤検出数": reduced_metrics["false_positive_count"],
+                "matched_ground_truth_count": reduced_metrics["matched_ground_truth_count"],
+                "missed_ground_truth_count": reduced_metrics["missed_ground_truth_count"],
+                "true_positive_candidate_count": reduced_metrics["true_positive_candidate_count"],
+                "false_positive_candidate_count": reduced_metrics["false_positive_candidate_count"],
                 "recall": f"{reduced_metrics['recall']:.3f}",
-                "precision": f"{reduced_metrics['precision']:.3f}",
+                "candidate_precision": f"{reduced_metrics['candidate_precision']:.3f}",
             }
         )
     write_csv(DEV_RULE_ABLATION_CSV, ablation_rows)
 
     comparison_rows = [
-        {"指標": "候補数", "改善前": INITIAL_GENERIC_METRICS["candidate_count"], "改善後": metrics["candidate_count"], "差分": metrics["candidate_count"] - INITIAL_GENERIC_METRICS["candidate_count"]},
-        {"指標": "検出数", "改善前": INITIAL_GENERIC_METRICS["detected_count"], "改善後": metrics["detected_count"], "差分": metrics["detected_count"] - INITIAL_GENERIC_METRICS["detected_count"]},
-        {"指標": "見逃し数", "改善前": INITIAL_GENERIC_METRICS["missed_count"], "改善後": metrics["missed_count"], "差分": metrics["missed_count"] - INITIAL_GENERIC_METRICS["missed_count"]},
-        {"指標": "誤検出数", "改善前": INITIAL_GENERIC_METRICS["false_positive_count"], "改善後": metrics["false_positive_count"], "差分": metrics["false_positive_count"] - INITIAL_GENERIC_METRICS["false_positive_count"]},
+        {"指標": "ground_truth_count", "改善前": INITIAL_GENERIC_METRICS["ground_truth_count"], "改善後": metrics["ground_truth_count"], "差分": metrics["ground_truth_count"] - INITIAL_GENERIC_METRICS["ground_truth_count"]},
+        {"指標": "candidate_count", "改善前": INITIAL_GENERIC_METRICS["candidate_count"], "改善後": metrics["candidate_count"], "差分": metrics["candidate_count"] - INITIAL_GENERIC_METRICS["candidate_count"]},
+        {"指標": "matched_ground_truth_count", "改善前": INITIAL_GENERIC_METRICS["matched_ground_truth_count"], "改善後": metrics["matched_ground_truth_count"], "差分": metrics["matched_ground_truth_count"] - INITIAL_GENERIC_METRICS["matched_ground_truth_count"]},
+        {"指標": "missed_ground_truth_count", "改善前": INITIAL_GENERIC_METRICS["missed_ground_truth_count"], "改善後": metrics["missed_ground_truth_count"], "差分": metrics["missed_ground_truth_count"] - INITIAL_GENERIC_METRICS["missed_ground_truth_count"]},
+        {"指標": "true_positive_candidate_count", "改善前": INITIAL_GENERIC_METRICS["true_positive_candidate_count"], "改善後": metrics["true_positive_candidate_count"], "差分": metrics["true_positive_candidate_count"] - INITIAL_GENERIC_METRICS["true_positive_candidate_count"]},
+        {"指標": "false_positive_candidate_count", "改善前": INITIAL_GENERIC_METRICS["false_positive_candidate_count"], "改善後": metrics["false_positive_candidate_count"], "差分": metrics["false_positive_candidate_count"] - INITIAL_GENERIC_METRICS["false_positive_candidate_count"]},
         {"指標": "recall", "改善前": f"{INITIAL_GENERIC_METRICS['recall']:.3f}", "改善後": f"{metrics['recall']:.3f}", "差分": f"{metrics['recall'] - INITIAL_GENERIC_METRICS['recall']:.3f}"},
-        {"指標": "precision", "改善前": f"{INITIAL_GENERIC_METRICS['precision']:.3f}", "改善後": f"{metrics['precision']:.3f}", "差分": f"{metrics['precision'] - INITIAL_GENERIC_METRICS['precision']:.3f}"},
-        {"指標": "平均被覆率", "改善前": f"{INITIAL_GENERIC_METRICS['average_coverage']:.3f}", "改善後": f"{metrics['average_coverage']:.3f}", "差分": f"{metrics['average_coverage'] - INITIAL_GENERIC_METRICS['average_coverage']:.3f}"},
+        {"指標": "candidate_precision", "改善前": f"{INITIAL_GENERIC_METRICS['candidate_precision']:.3f}", "改善後": f"{metrics['candidate_precision']:.3f}", "差分": f"{metrics['candidate_precision'] - INITIAL_GENERIC_METRICS['candidate_precision']:.3f}"},
+        {"指標": "average_coverage", "改善前": f"{INITIAL_GENERIC_METRICS['average_coverage']:.3f}", "改善後": f"{metrics['average_coverage']:.3f}", "差分": f"{metrics['average_coverage'] - INITIAL_GENERIC_METRICS['average_coverage']:.3f}"},
+        {"指標": "minimum_coverage", "改善前": f"{INITIAL_GENERIC_METRICS['minimum_coverage']:.3f}", "改善後": f"{metrics['minimum_coverage']:.3f}", "差分": f"{metrics['minimum_coverage'] - INITIAL_GENERIC_METRICS['minimum_coverage']:.3f}"},
     ]
     write_csv(DEV_COMPARISON_CSV, comparison_rows)
     write_csv(DEV_INITIAL_FALSE_POSITIVE_CAUSES_CSV, INITIAL_FALSE_POSITIVE_CAUSES)
 
 
 def evaluate_without_writing(truths: list[TruthRect], candidates: list[CandidateRect]) -> dict[str, Any]:
-    matched_candidate_indexes: set[int] = set()
-    detected = 0
+    true_positive_candidate_indexes: set[int] = set()
+    matched_ground_truth_count = 0
     for truth in truths:
         best: tuple[int, CandidateRect, float] | None = None
         for index, candidate in enumerate(candidates):
             if candidate.page != truth.page or candidate.entity_type != truth.entity_type:
                 continue
             item_coverage = coverage(truth.rect, candidate.rect)
+            if item_coverage >= 0.85:
+                true_positive_candidate_indexes.add(index)
             if item_coverage >= 0.85 and (best is None or item_coverage > best[2]):
                 best = (index, candidate, item_coverage)
         if best:
-            detected += 1
-            matched_candidate_indexes.add(best[0])
+            matched_ground_truth_count += 1
     candidate_count = len(candidates)
-    false_positive_count = candidate_count - len(matched_candidate_indexes)
-    truth_count = len(truths)
+    true_positive_candidate_count = len(true_positive_candidate_indexes)
+    false_positive_candidate_count = candidate_count - true_positive_candidate_count
+    ground_truth_count = len(truths)
     return {
+        "ground_truth_count": ground_truth_count,
         "candidate_count": candidate_count,
-        "detected_count": detected,
-        "missed_count": truth_count - detected,
-        "false_positive_count": false_positive_count,
-        "recall": detected / truth_count if truth_count else 0.0,
-        "precision": detected / candidate_count if candidate_count else 0.0,
+        "matched_ground_truth_count": matched_ground_truth_count,
+        "missed_ground_truth_count": ground_truth_count - matched_ground_truth_count,
+        "true_positive_candidate_count": true_positive_candidate_count,
+        "false_positive_candidate_count": false_positive_candidate_count,
+        "recall": matched_ground_truth_count / ground_truth_count if ground_truth_count else 0.0,
+        "candidate_precision": true_positive_candidate_count / candidate_count if candidate_count else 0.0,
     }
 
 
@@ -622,23 +811,26 @@ def main() -> int:
     pages = read_split_pages()
     truths = read_truths(set(pages))
     write_truth_classification(truths)
+    write_metric_definitions()
     candidates = generate_candidates(pages)
     write_candidate_csv(candidates)
     metrics = evaluate(truths, candidates)
+    write_metric_integrity(metrics)
     write_summaries(truths, candidates, metrics)
     ocr_text_by_page = extract_ocr_text_by_page(pages)
-    write_csv(
-        DEV_MISS_CLASSIFICATION_CSV,
-        classify_misses(truths, candidates, metrics["eval_rows"], ocr_text_by_page),
-    )
+    miss_rows = classify_misses(truths, candidates, metrics["eval_rows"], ocr_text_by_page)
+    write_csv(DEV_MISS_CLASSIFICATION_CSV, miss_rows)
+    write_miss_summaries(miss_rows)
     print(f"development_pages={','.join(str(page) for page in pages)}")
-    print(f"truth_count={metrics['truth_count']}")
+    print(f"ground_truth_count={metrics['ground_truth_count']}")
     print(f"candidate_count={metrics['candidate_count']}")
-    print(f"detected_count={metrics['detected_count']}")
-    print(f"missed_count={metrics['missed_count']}")
-    print(f"false_positive_count={metrics['false_positive_count']}")
+    print(f"matched_ground_truth_count={metrics['matched_ground_truth_count']}")
+    print(f"missed_ground_truth_count={metrics['missed_ground_truth_count']}")
+    print(f"true_positive_candidate_count={metrics['true_positive_candidate_count']}")
+    print(f"false_positive_candidate_count={metrics['false_positive_candidate_count']}")
     print(f"recall={metrics['recall']:.3f}")
-    print(f"precision={metrics['precision']:.3f}")
+    print(f"candidate_precision={metrics['candidate_precision']:.3f}")
+    print(f"legacy_ground_truth_per_candidate_ratio={metrics['legacy_ground_truth_per_candidate_ratio']:.3f}")
     print(f"average_coverage={metrics['average_coverage']:.3f}")
     print(f"minimum_coverage={metrics['minimum_coverage']:.3f}")
     print(f"average_excess={metrics['average_excess']:.3f}")

@@ -1,0 +1,93 @@
+{
+  "generation_name": "PDF generic detection Generation3",
+  "dataset_name": "PDF汎用検出 開発データセットv1",
+  "dataset_version": "pdf31_development_dataset_v1",
+  "created_at": "2026-07-23",
+  "source_branch": "feature/pdf-generic-detection-v1",
+  "evaluation_scope": {
+    "development_dataset_pages": [5, 6, 10, 11, 13, 15],
+    "ground_truth_count": 49,
+    "note": "This 31-page PDF is a development dataset and must not be used as a complete holdout, unknown-data, or final generalization benchmark."
+  },
+  "baseline_v1_comparison": {
+    "ground_truth_count": 49,
+    "baseline_candidate_count": 0,
+    "baseline_matched_ground_truth_count": 0,
+    "baseline_missed_ground_truth_count": 49,
+    "baseline_false_positive_candidate_count": 0,
+    "generation3_candidate_count": 28,
+    "generation3_matched_ground_truth_count": 30,
+    "generation3_missed_ground_truth_count": 19,
+    "generation3_true_positive_candidate_count": 20,
+    "generation3_false_positive_candidate_count": 8,
+    "generation3_recall": 0.612,
+    "generation3_candidate_precision": 0.714,
+    "generation3_average_coverage": 0.968,
+    "generation3_minimum_coverage": 0.853
+  },
+  "initial_generic_rules_comparison": {
+    "initial_candidate_count": 57,
+    "initial_matched_ground_truth_count": 10,
+    "initial_missed_ground_truth_count": 39,
+    "initial_true_positive_candidate_count": 10,
+    "initial_false_positive_candidate_count": 47,
+    "initial_recall": 0.204,
+    "initial_candidate_precision": 0.175,
+    "initial_average_coverage": 0.945,
+    "initial_minimum_coverage": 0.864,
+    "generation3_candidate_count": 28,
+    "generation3_matched_ground_truth_count": 30,
+    "generation3_missed_ground_truth_count": 19,
+    "generation3_true_positive_candidate_count": 20,
+    "generation3_false_positive_candidate_count": 8,
+    "generation3_recall": 0.612,
+    "generation3_candidate_precision": 0.714,
+    "generation3_average_coverage": 0.968,
+    "generation3_minimum_coverage": 0.853
+  },
+  "generation2_comparison": {
+    "generation2_candidate_count": 27,
+    "generation2_matched_ground_truth_count": 27,
+    "generation2_missed_ground_truth_count": 22,
+    "generation2_true_positive_candidate_count": 16,
+    "generation2_false_positive_candidate_count": 11,
+    "generation2_recall": 0.551,
+    "generation2_candidate_precision": 0.593,
+    "generation2_average_coverage": 0.970,
+    "generation2_minimum_coverage": 0.853,
+    "generation3_candidate_count": 28,
+    "generation3_matched_ground_truth_count": 30,
+    "generation3_missed_ground_truth_count": 19,
+    "generation3_true_positive_candidate_count": 20,
+    "generation3_false_positive_candidate_count": 8,
+    "generation3_recall": 0.612,
+    "generation3_candidate_precision": 0.714,
+    "generation3_average_coverage": 0.968,
+    "generation3_minimum_coverage": 0.853
+  },
+  "formal_metrics": {
+    "ground_truth_count": 49,
+    "candidate_count": 28,
+    "matched_ground_truth_count": 30,
+    "missed_ground_truth_count": 19,
+    "true_positive_candidate_count": 20,
+    "false_positive_candidate_count": 8,
+    "recall": 0.612,
+    "candidate_precision": 0.714,
+    "average_coverage": 0.968,
+    "minimum_coverage": 0.853
+  },
+  "independence_audit": {
+    "pass_count": 9,
+    "total_count": 9,
+    "result": "PASS"
+  },
+  "practicality_judgement": "Operational only as a human-confirmed PDF anonymization assistance workflow. It is not a fully automatic anonymizer.",
+  "frozen_policy": [
+    "Treat the current 31-page PDF as PDF汎用検出 開発データセットv1.",
+    "Do not use this PDF for complete holdout evaluation, unknown-data evaluation, or final generalization evaluation.",
+    "Do not change detection rules in the future based on this PDF's candidate results, misses, false positives, OCR text, or review data.",
+    "Do not store personal names, company names, source text, OCR text, ground-truth text, coordinates, HMAC values, or secrets in Git-managed evaluation summaries."
+  ],
+  "required_report_wording": "PDF汎用検出 開発データセットv1では、Generation3として recall 0.612、candidate_precision 0.714 まで改善した。この31ページPDFは開発データとして固定し、今後の完全ホールドアウト評価や未知データ評価には使用しない。"
+}
