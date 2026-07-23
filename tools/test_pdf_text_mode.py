@@ -9,7 +9,7 @@ import fitz
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from excel_privacy_cleaner.excel_processor import ProcessingOptions  # noqa: E402
-from excel_privacy_cleaner.pdf_processor import PdfPrivacyProcessor  # noqa: E402
+from excel_privacy_cleaner.pdf_processor import PDF_ASSISTANCE_NOTICE, PdfPrivacyProcessor  # noqa: E402
 
 
 def assert_true(condition: bool, message: str) -> None:
@@ -57,6 +57,10 @@ def main() -> int:
         assert_true(result.pdf_path.exists(), "Anonymized PDF should be written")
         assert_true(result.csv_path.exists(), "PDF findings CSV should be written")
         assert_true(result.report_path.exists(), "PDF processing report should be written")
+        report_text = result.report_path.read_text(encoding="utf-8")
+        assert_true("全ページ確認前提のPDF匿名化支援機能" in report_text, "Report should identify PDF assist mode")
+        assert_true("完全自動匿名化: いいえ" in report_text, "Report should not describe PDF as fully automatic")
+        assert_true(PDF_ASSISTANCE_NOTICE in report_text, "Report should include PDF assistance notice")
 
         output_doc = fitz.open(result.pdf_path)
         try:
@@ -81,6 +85,7 @@ def main() -> int:
             unsupported_processor.convert_with_artifacts(blank, blank_findings, Path(tmp))
         except RuntimeError as exc:
             assert_true("出力できません" in str(exc) or "変換対象" in str(exc), "Blank PDF should not be output as completed anonymization")
+            assert_true(PDF_ASSISTANCE_NOTICE in str(exc), "Output block should explain PDF assistance limitations")
         else:
             raise AssertionError("Blank PDF should not be output")
 

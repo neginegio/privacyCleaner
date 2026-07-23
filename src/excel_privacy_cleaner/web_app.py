@@ -215,7 +215,7 @@ def render_page(status: str = "", error: str = "", download_token: str | None = 
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Excel 機密情報削除 - Presidio</title>
+  <title>hoso Privacy Cleaner</title>
   <style>
     body {{ font-family: "Meiryo UI", "Yu Gothic UI", sans-serif; margin: 0; color: #1f2937; background: #f6f7f9; }}
     main {{ max-width: 1180px; margin: 0 auto; padding: 24px; }}
@@ -245,7 +245,7 @@ def render_page(status: str = "", error: str = "", download_token: str | None = 
 </head>
 <body>
 <main>
-  <h1>Excel 機密情報削除 - Presidio</h1>
+  <h1>hoso Privacy Cleaner</h1>
   <p class="meta">処理は localhost 上のこの PC 内だけで行います。外部クラウドには送信しません。原本は上書きしません。</p>
   {message}
   {download}

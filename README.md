@@ -1,4 +1,4 @@
-# Excel 機密情報削除 - Presidio Python 版
+# hoso Privacy Cleaner
 
 Windows 上で動く、ローカル完結型の Excel 匿名化ツールです。Python で作られており、PII 検出には Microsoft Presidio の `PatternRecognizer` と日本語向けカスタム Recognizer を使います。exe を起動するとネイティブな Windows アプリ画面が開き、Excel ファイルを投入して、検出結果を人が確認してから Excel として出力できます。
 
@@ -20,7 +20,7 @@ build_exe.cmd
 ビルド後の実行ファイル:
 
 ```text
-dist\ExcelPrivacyCleanerNativeCsv\ExcelPrivacyCleanerNativeCsv.exe
+dist\hosoPrivacyCleaner\hosoPrivacyCleaner.exe
 ```
 
 通常利用時は `Start-ExcelPrivacyCleaner.cmd` を実行してください。CSV出力対応版のネイティブ exe がある場合はその版を起動し、ない場合は既存 exe または Python 版を起動します。

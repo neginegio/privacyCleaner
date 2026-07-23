@@ -343,7 +343,7 @@ function Convert-Workbook {
 
 function New-MainForm {
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Excel 機密情報削除"
+    $form.Text = "hoso Privacy Cleaner"
     $form.Width = 1180
     $form.Height = 760
     $form.MinimumSize = New-Object System.Drawing.Size(980, 640)

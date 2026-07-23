@@ -27,7 +27,14 @@ from PySide6.QtWidgets import (
 
 from .excel_processor import ExcelPrivacyProcessor, ProcessingOptions, write_findings_csv
 from .models import Finding
-from .pdf_processor import PDF_REDACTION_MODES, PdfPrivacyProcessor, final_output_status, validate_ocr_environment, write_pdf_findings_csv
+from .pdf_processor import (
+    PDF_ASSISTANCE_NOTICE,
+    PDF_REDACTION_MODES,
+    PdfPrivacyProcessor,
+    final_output_status,
+    validate_ocr_environment,
+    write_pdf_findings_csv,
+)
 from .pdf_review_dialog import PdfCandidateReviewDialog
 from .resources import resource_path
 
@@ -44,7 +51,7 @@ def asset_path(relative_path: str) -> Path:
 class ExcelPrivacyCleanerWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Excel 機密情報削除 - Presidio")
+        self.setWindowTitle("hoso Privacy Cleaner")
         icon_path = asset_path("assets/app_icon.ico")
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
@@ -75,7 +82,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
 
-        title = QLabel("Excel / PDF ファイルを選択してください。Presidio による検出はこの PC 内だけで行い、原本は上書きしません。")
+        title = QLabel("Excel / PDF ファイルを選択してください。検出はこの PC 内だけで行い、原本は上書きしません。")
         title.setStyleSheet("font-size: 15px; font-weight: 600;")
         layout.addWidget(title)
 
@@ -196,14 +203,22 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 QMessageBox.warning(self, "PDF OCR設定エラー", "\n".join(ocr_errors))
                 self.status_label.setText("PDF選択済み: OCR設定に不足があります。")
                 return
+            self.status_label.setText("PDF選択済み: 全ページ確認前提の匿名化支援です。検査開始を押してください。")
+            return
         self.status_label.setText("選択済み: 検査開始を押してください。")
 
     def scan_file(self) -> None:
         if self.source_path is None:
             QMessageBox.warning(self, "ファイル未選択", "Excel ファイルを選択してください。")
             return
+        busy_cursor = False
         try:
-            self.status_label.setText("検査中: Presidio カスタム Recognizer でローカル解析しています...")
+            if self.is_pdf_source():
+                self.status_label.setText("PDF検査中: OCRとローカル検出を実行しています。最終出力には全ページ確認が必要です...")
+            else:
+                self.status_label.setText("検査中: Presidio カスタム Recognizer でローカル解析しています...")
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            busy_cursor = True
             QApplication.processEvents()
             options = self.current_options()
             self.findings = self.processor.scan(self.source_path, options=options)
@@ -216,23 +231,35 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             formula_note = (
                 f" 数式文字列化予定: {formula_count} 件。"
                 if formula_count
-                else (" PDFの検出候補を確認してください。" if self.is_pdf_source() else " 数式は維持します。")
+                else (" PDFは全ページ確認が必要です。PDF候補確認を開いてください。" if self.is_pdf_source() else " 数式は維持します。")
             )
-            self.status_label.setText(f"検査完了: {len(self.findings)} 件を検出しました。変換対象を確認してください。{formula_note}")
+            if self.is_pdf_source():
+                self.status_label.setText(
+                    f"PDF検査完了: {len(self.findings)} 件を検出しました。"
+                    "PDF候補確認で全ページを確認するまで、匿名化済みPDFとして出力できません。"
+                )
+            else:
+                self.status_label.setText(f"検査完了: {len(self.findings)} 件を検出しました。変換対象を確認してください。{formula_note}")
             self.update_pdf_review_button()
         except Exception as exc:
+            if busy_cursor:
+                QApplication.restoreOverrideCursor()
+                busy_cursor = False
             QMessageBox.critical(self, "検査エラー", str(exc))
             self.status_label.setText("検査エラー")
             self.update_pdf_review_button()
+        finally:
+            if busy_cursor:
+                QApplication.restoreOverrideCursor()
 
     def convert_file(self) -> None:
         if self.source_path is None:
             QMessageBox.warning(self, "ファイル未選択", "Excel ファイルを選択してください。")
             return
+        busy_cursor = False
         try:
             self.update_findings_from_table()
             self.status_label.setText("変換中: 一時コピーへ置換を適用しています...")
-            QApplication.processEvents()
             options = self.current_options()
             if self.is_pdf_source() and isinstance(self.processor, PdfPrivacyProcessor):
                 can_output, reasons = final_output_status(
@@ -249,12 +276,17 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 if QMessageBox.question(self, "PDF最終出力確認", summary) != QMessageBox.Yes:
                     self.status_label.setText("PDF出力をキャンセルしました。")
                     return
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                busy_cursor = True
+                QApplication.processEvents()
                 result = self.processor.convert_with_artifacts(
                     self.source_path,
                     self.findings,
                     options=options,
                     redaction_mode=str(self.pdf_redaction_combo.currentData()),
                 )
+                QApplication.restoreOverrideCursor()
+                busy_cursor = False
                 output_path = result.pdf_path
                 self.history.insertItem(
                     0,
@@ -264,12 +296,18 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 QMessageBox.information(
                     self,
                     "保存完了",
-                    "匿名化済みPDF、検出・変換結果CSV、処理報告書を保存しました。\n\n"
+                    "全ページ確認済みのPDFとして、匿名化済みPDF、検出・変換結果CSV、処理報告書を保存しました。\n\n"
                     f"PDF: {result.pdf_path}\nCSV: {result.csv_path}\n報告書: {result.report_path}\n\n"
+                    "PDF OCR匿名化は支援機能です。報告書で確認状態と検証状態を確認してください。\n"
                     "原本は上書きしていません。一時コピーは削除済みです。",
                 )
             else:
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                busy_cursor = True
+                QApplication.processEvents()
                 result = self.processor.convert_with_artifacts(self.source_path, self.findings, options=options)
+                QApplication.restoreOverrideCursor()
+                busy_cursor = False
                 output_path = result.excel_path
                 converted_count = result.converted_count
                 formula_note = f"  数式維持 {result.formula_maintained_count} 件" if result.formula_maintained_count else ""
@@ -286,8 +324,14 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                     "原本は上書きしていません。一時コピーは削除済みです。",
                 )
         except Exception as exc:
+            if busy_cursor:
+                QApplication.restoreOverrideCursor()
+                busy_cursor = False
             QMessageBox.critical(self, "変換エラー", str(exc))
             self.status_label.setText("変換エラー")
+        finally:
+            if busy_cursor:
+                QApplication.restoreOverrideCursor()
 
     def export_findings_csv(self) -> None:
         if not self.findings:
@@ -330,7 +374,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         dialog = PdfCandidateReviewDialog(self.processor, self.findings, self)
         dialog.exec()
         self.refresh_table()
-        self.status_label.setText("PDF候補確認を反映しました。未確認候補を承認または解除してください。")
+        self.status_label.setText("PDF候補確認を反映しました。全ページが確認済みになるまで最終出力できません。")
 
     def refresh_table(self) -> None:
         self.table.setRowCount(0)
@@ -402,6 +446,8 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             )
         else:
             self.mode_note.setText("外部共有用では、既存の匿名化方針に近い形で企業機密項目も変換対象にします。")
+        if self.is_pdf_source():
+            self.mode_note.setText(self.mode_note.text() + "\n" + PDF_ASSISTANCE_NOTICE)
         self.pdf_redaction_combo.setEnabled(self.is_pdf_source())
         self.update_pdf_review_button()
 
@@ -433,6 +479,8 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         manual_count = sum(1 for finding in self.findings if finding.detection_kind == "MANUAL")
         selected_count = sum(1 for finding in self.findings if finding.enabled)
         text = [
+            "PDF OCR匿名化は全ページ確認前提の支援機能です。",
+            "未確認ページ、未確認候補、OCR不能またはFAILED未対応ページ、検証失敗ページが残っている場合は出力できません。",
             f"全ページ数: {total_pages}",
             f"確認済みページ数: {completed_like}",
             f"UNREVIEWEDページ数: {state_counts.get('UNREVIEWED', 0)}",
@@ -442,7 +490,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             f"手動追加範囲数: {manual_count}",
             f"匿名化処理予定件数: {selected_count}",
             "再OCR/残存検証: 出力後に区分して記録",
-            f"出力可否: {'出力可能' if can_output else '出力不可'}",
+            f"出力可否: {'出力可能（全ページ確認済み）' if can_output else '出力不可'}",
         ]
         if reasons:
             text.append("理由: " + " / ".join(reasons))

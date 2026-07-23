@@ -16,7 +16,7 @@ SUPPORTED_EXTENSIONS = {".xlsx", ".xlsm"}
 class ExcelPrivacyCleanerApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Excel 機密情報削除 - Presidio")
+        self.title("hoso Privacy Cleaner")
         self.geometry("1180x760")
         self.minsize(980, 640)
 
