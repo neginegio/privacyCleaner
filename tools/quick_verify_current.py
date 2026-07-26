@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from openpyxl import load_workbook
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from excel_privacy_cleaner.excel_processor import ExcelPrivacyProcessor
 
@@ -34,11 +37,17 @@ def main() -> int:
     print("candidate_preview", [(f.sheet, f.cell, f.original, f.replacement) for f in candidates[:12]])
 
     blocked = False
-    try:
-        processor.convert(SOURCE, findings, Path("tmp_verify"))
-    except Exception as exc:
-        blocked = True
-        print("blocked", str(exc)[:300])
+    if not candidates:
+        raise AssertionError("確認候補が検出されませんでした。")
+    if candidates:
+        candidates[0].enabled = False
+        try:
+            processor.convert(SOURCE, findings, Path("tmp_verify"))
+        except Exception as exc:
+            blocked = "未確認候補" in str(exc)
+            print("blocked", str(exc)[:300])
+    if not blocked:
+        raise AssertionError("未確認候補が無効な状態で変換がブロックされませんでした。")
 
     for finding in findings:
         if finding.detection_kind == "確認候補":
