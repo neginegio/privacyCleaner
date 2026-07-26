@@ -1,0 +1,152 @@
+{
+  "evaluation_name": "Generation3 complete holdout evaluation 003",
+  "status": "final",
+  "dataset_position": "Generation3 完全ホールドアウト評価③（評価済み）",
+  "generation": {
+    "tag": "pdf-generation3",
+    "commit": "2ab576ddc75c7493ad9629675ef145dde7a1dc32",
+    "frozen_before_evaluation": true
+  },
+  "document": {
+    "holdout_id": "Holdout003",
+    "page_count": 16,
+    "ground_truth_count": 43,
+    "pdf_sha256": "1fb4664482d940990df2c991a1159f2d020361eab8dd5103f5f419f5a28d91dc"
+  },
+  "input_integrity": {
+    "initial_candidate_csv_sha256": "273be3008f8241c29a79ee90dda39cf4bd46c7fc5420f4290dcf95a207e2f849",
+    "ground_truth_csv_sha256": "467c3c88130b3acbec8c9d7298326a9f89f638fa00c0e8316a9198f1067366ed",
+    "evaluation_csv_sha256": "82ba09202cd2420afc6519f59743cc0bb143b40fa2a0dfefc3a94110618ee90f",
+    "evaluation_json_sha256": "6026f5a3537134b247499f5942f8939cf163f4cb80fc69aef5bc3e9f9cf8f799",
+    "evaluation_summary_sha256": "7b54f5132bef6c301edbe2edaa683c4c459798239324fe281ed769dd19c8160f",
+    "all_expected_hashes_matched": true
+  },
+  "evaluation_method_identity": {
+    "same_as_generation3_development_metrics": true,
+    "coverage_definition": "intersection_area / ground_truth_area",
+    "matching_condition": "same page + normalized entity type + coverage >= 0.85",
+    "category_normalization": {
+      "個人名": "氏名"
+    },
+    "organization_to_company_name_normalization": false,
+    "holdout003_specific_threshold_or_rule": false
+  },
+  "evaluation_process": {
+    "initial_candidates_fixed_before_ground_truth_review": true,
+    "ground_truth_created_independently_without_candidate_overlay": true,
+    "candidate_generation_changed": false,
+    "ocr_settings_changed": false,
+    "evaluation_method_changed": false,
+    "threshold_changed_after_result": false,
+    "cause_analysis_performed": false,
+    "generation4_considered": false
+  },
+  "metrics": {
+    "ground_truth_count": 43,
+    "candidate_count": 44,
+    "matched_ground_truth_count": 0,
+    "missed_ground_truth_count": 43,
+    "true_positive_candidate_count": 0,
+    "false_positive_candidate_count": 44,
+    "recall": 0.0,
+    "candidate_precision": 0.0,
+    "average_coverage": 0.0,
+    "minimum_coverage": 0.0
+  },
+  "truth_category_metrics": {
+    "company_name": {
+      "ground_truth": 25,
+      "matched": 0,
+      "missed": 25
+    },
+    "address": {
+      "ground_truth": 3,
+      "matched": 0,
+      "missed": 3
+    },
+    "person_name": {
+      "ground_truth": 15,
+      "matched": 0,
+      "missed": 15
+    },
+    "bank_name": {
+      "ground_truth": 0,
+      "matched": 0,
+      "missed": 0
+    }
+  },
+  "candidate_category_metrics": {
+    "address": {
+      "true_positive": 0,
+      "false_positive": 25
+    },
+    "postal_code": {
+      "true_positive": 0,
+      "false_positive": 2
+    },
+    "phone_number": {
+      "true_positive": 0,
+      "false_positive": 2
+    },
+    "email_address": {
+      "true_positive": 0,
+      "false_positive": 1
+    },
+    "organization_name": {
+      "true_positive": 0,
+      "false_positive": 12
+    },
+    "person_name": {
+      "true_positive": 0,
+      "false_positive": 2
+    }
+  },
+  "holdout_reference_summary": {
+    "holdout001": {
+      "ground_truth": 10,
+      "matched": 0,
+      "candidate_count": 5,
+      "true_positive": 0,
+      "false_positive": 5
+    },
+    "holdout002": {
+      "ground_truth": 49,
+      "matched": 0,
+      "candidate_count": 2,
+      "true_positive": 0,
+      "false_positive": 2
+    },
+    "holdout003": {
+      "ground_truth": 43,
+      "matched": 0,
+      "candidate_count": 44,
+      "true_positive": 0,
+      "false_positive": 44
+    },
+    "three_document_reference_total": {
+      "ground_truth": 102,
+      "matched": 0,
+      "candidate_count": 51,
+      "true_positive": 0,
+      "false_positive": 51,
+      "recall": 0.0,
+      "candidate_precision": 0.0,
+      "note": "3文書に対する参考集計"
+    }
+  },
+  "interpretation": "Generation3の完全未使用PDFによる第3回ホールドアウト評価では、16ページ・正解43件の単一文書に対してRecall 0.000 / Candidate Precision 0.000だった。この結果はGeneration3の未知文書全般の性能が0であると断定するものではない。",
+  "future_use_policy": {
+    "final_result_will_not_be_changed": true,
+    "if_used_for_cause_analysis_or_generation4_development": "その時点からこのPDFは開発・分析データとして扱い、Generation4以降の完全ホールドアウト評価には再利用しない。"
+  },
+  "sensitive_data_policy": {
+    "contains_pdf_original": false,
+    "contains_ocr_original_text": false,
+    "contains_company_names": false,
+    "contains_person_names": false,
+    "contains_ground_truth_coordinates": false,
+    "contains_candidate_coordinates": false,
+    "contains_ground_truth_csv_content": false,
+    "contains_initial_candidate_csv_content": false
+  }
+}
