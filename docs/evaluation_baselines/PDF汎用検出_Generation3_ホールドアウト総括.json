@@ -1,0 +1,108 @@
+{
+  "summary_name": "Generation3 complete holdout evaluation summary",
+  "status": "final",
+  "generation": {
+    "tag": "pdf-generation3",
+    "commit": "2ab576ddc75c7493ad9629675ef145dde7a1dc32"
+  },
+  "development_dataset_v1": {
+    "ground_truth_count": 49,
+    "candidate_count": 28,
+    "matched_ground_truth_count": 30,
+    "missed_ground_truth_count": 19,
+    "true_positive_candidate_count": 20,
+    "false_positive_candidate_count": 8,
+    "recall": 0.612,
+    "candidate_precision": 0.714,
+    "average_coverage": 0.968,
+    "minimum_coverage": 0.853
+  },
+  "holdouts": {
+    "holdout001": {
+      "ground_truth_count": 10,
+      "candidate_count": 5,
+      "matched_ground_truth_count": 0,
+      "missed_ground_truth_count": 10,
+      "true_positive_candidate_count": 0,
+      "false_positive_candidate_count": 5,
+      "recall": 0.0,
+      "candidate_precision": 0.0
+    },
+    "holdout002": {
+      "ground_truth_count": 49,
+      "candidate_count": 2,
+      "matched_ground_truth_count": 0,
+      "missed_ground_truth_count": 49,
+      "true_positive_candidate_count": 0,
+      "false_positive_candidate_count": 2,
+      "recall": 0.0,
+      "candidate_precision": 0.0
+    },
+    "holdout003": {
+      "ground_truth_count": 43,
+      "candidate_count": 44,
+      "matched_ground_truth_count": 0,
+      "missed_ground_truth_count": 43,
+      "true_positive_candidate_count": 0,
+      "false_positive_candidate_count": 44,
+      "recall": 0.0,
+      "candidate_precision": 0.0
+    }
+  },
+  "three_document_reference_total": {
+    "ground_truth_count": 102,
+    "candidate_count": 51,
+    "matched_ground_truth_count": 0,
+    "missed_ground_truth_count": 102,
+    "true_positive_candidate_count": 0,
+    "false_positive_candidate_count": 51,
+    "recall": 0.0,
+    "candidate_precision": 0.0,
+    "note": "3文書に対する参考集計"
+  },
+  "interpretation": "Generation3は開発データセットでは性能改善が確認されたが、完全未使用の3文書では正解102件に対して一致した正解矩形が0件であり、現方式について未知文書への汎化性能を確認できなかった。",
+  "non_claims": [
+    "すべてのPDFで性能0であるとは記載しない。",
+    "PDF匿名化は不可能であるとは記載しない。"
+  ],
+  "development_decision": {
+    "pause_generation3_additional_tuning": true,
+    "do_not_start_generation4_now": true,
+    "current_pdf_feature_position": "全ページ人間確認を前提とした匿名化支援",
+    "not_a_fully_automatic_pdf_anonymizer": true,
+    "preserve_generation3_and_holdout_results": true,
+    "do_not_delete_existing_pdf_code": true,
+    "future_pdf_restart_requires_redesign_consideration": true,
+    "possible_future_technical_topics": [
+      "OCR品質",
+      "文書レイアウト解析",
+      "表構造解析",
+      "固有表現認識"
+    ],
+    "cause_analysis_or_generation4_design_performed_now": false,
+    "positioning": "検証結果に基づき、追加投資を一時停止"
+  },
+  "word_direction": {
+    "move_primary_development_target_to_word_anonymization": true,
+    "implementation_started_now": false,
+    "reasons": [
+      "Wordでは通常、文字情報を直接取得できる",
+      "OCRを必須としない",
+      "段落、表、セル、ヘッダー、フッター等の文書構造を利用できる",
+      "PDFで問題となったOCR座標と表示位置の対応問題を大幅に減らせる可能性がある",
+      "既存Excel匿名化機能と共通化できる匿名化ルールも検討できる"
+    ]
+  },
+  "sensitive_data_policy": {
+    "contains_pdf_original": false,
+    "contains_anonymized_pdf": false,
+    "contains_ocr_original_text": false,
+    "contains_company_names": false,
+    "contains_person_names": false,
+    "contains_ground_truth_coordinates": false,
+    "contains_candidate_coordinates": false,
+    "contains_ground_truth_csv_content": false,
+    "contains_initial_candidate_csv_content": false,
+    "contains_secret_key": false
+  }
+}
