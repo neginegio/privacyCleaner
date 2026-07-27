@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -9,6 +10,8 @@ from typing import Any
 
 from docx import Document
 
+from .presidio_japanese import JapanesePresidioDetector, entity_label
+
 
 WORD_SUPPORTED_EXTENSION = ".docx"
 WORD_MACRO_EXTENSION = ".docm"
@@ -16,6 +19,7 @@ WORD_MACRO_EXTENSION = ".docm"
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+WORD_CANDIDATE_CATEGORIES = {"会社名", "氏名", "住所", "電話番号", "メールアドレス", "銀行名"}
 
 
 class UnsupportedWordDocumentError(RuntimeError):
@@ -137,6 +141,34 @@ class WordStructureInventory:
     macro_parts: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class WordCandidate:
+    candidate_id: str
+    category: str
+    story_type: str
+    section_index: int | None
+    container_type: str
+    paragraph_index: int
+    table_index: int | None
+    row_index: int | None
+    cell_index: int | None
+    location_id: str
+    char_start: int
+    char_end: int
+    text: str
+    detection_rule: str
+    confidence: float
+    source: str
+    affected_run_indices: tuple[int, ...] = ()
+    context_before: str = ""
+    context_after: str = ""
+    cell_paragraph_index: int | None = None
+    header_footer_type: str | None = None
+    original_category: str = ""
+    hyperlink_url: str | None = None
+    property_name: str | None = None
+
+
 def extract_word_structure(path: Path) -> WordStructureInventory:
     validate_docx_input(path)
     source_sha256 = _file_sha256(path)
@@ -228,6 +260,34 @@ def extract_word_structure(path: Path) -> WordStructureInventory:
         unsupported_features=unsupported_features,
         macro_parts=macro_parts,
     )
+
+
+def detect_word_candidates(path: Path) -> tuple[WordStructureInventory, tuple[WordCandidate, ...]]:
+    inventory = extract_word_structure(path)
+    return inventory, candidates_for_inventory(inventory)
+
+
+def candidates_for_inventory(inventory: WordStructureInventory) -> tuple[WordCandidate, ...]:
+    detector = JapanesePresidioDetector()
+    candidates: list[WordCandidate] = []
+    seen: set[tuple[str, str, int, int, str, str]] = set()
+    runs_by_location = _runs_by_paragraph_location(inventory.runs)
+
+    for paragraph in inventory.paragraphs:
+        if not paragraph.text.strip():
+            continue
+        runs = runs_by_location.get(_paragraph_location_id(paragraph), ())
+        _append_text_candidates(candidates, seen, inventory, paragraph, paragraph.text, runs, detector, source="paragraph")
+
+    for hyperlink in inventory.hyperlinks:
+        if hyperlink.url:
+            _append_hyperlink_target_candidates(candidates, seen, inventory, hyperlink)
+
+    for property_name, value in _document_property_values(inventory.document_properties):
+        if value:
+            _append_property_candidates(candidates, seen, inventory, property_name, value, detector)
+
+    return tuple(candidates)
 
 
 def validate_docx_input(path: Path) -> None:
@@ -476,6 +536,394 @@ def _document_properties(document: Any) -> WordDocumentProperties:
         language=str(props.language or ""),
         revision=props.revision,
         version=str(props.version or ""),
+    )
+
+
+def _append_text_candidates(
+    candidates: list[WordCandidate],
+    seen: set[tuple[str, str, int, int, str, str]],
+    inventory: WordStructureInventory,
+    paragraph: WordParagraphText,
+    text: str,
+    runs: tuple[WordTextRun, ...],
+    detector: JapanesePresidioDetector,
+    *,
+    source: str,
+) -> None:
+    for start, end, category, rule, confidence, original_category in _word_detector_results(text, detector):
+        _append_candidate(
+            candidates,
+            seen,
+            inventory,
+            paragraph,
+            text,
+            start,
+            end,
+            category,
+            rule,
+            confidence,
+            source,
+            affected_runs=_affected_run_indices(runs, start, end),
+            original_category=original_category,
+        )
+
+
+def _append_hyperlink_target_candidates(
+    candidates: list[WordCandidate],
+    seen: set[tuple[str, str, int, int, str, str]],
+    inventory: WordStructureInventory,
+    hyperlink: WordHyperlink,
+) -> None:
+    paragraph = WordParagraphText(
+        story_type=hyperlink.story_type,
+        section_index=hyperlink.section_index,
+        container_type=hyperlink.container_type,
+        paragraph_index=hyperlink.paragraph_index,
+        table_index=hyperlink.table_index,
+        row_index=hyperlink.row_index,
+        cell_index=hyperlink.cell_index,
+        cell_paragraph_index=hyperlink.cell_paragraph_index,
+        header_footer_type=hyperlink.header_footer_type,
+        text=hyperlink.url,
+        part_name=hyperlink.part_name,
+        element_path=hyperlink.element_path,
+    )
+    for start, end, category, rule, confidence in _url_candidate_results(hyperlink.url):
+        _append_candidate(
+            candidates,
+            seen,
+            inventory,
+            paragraph,
+            hyperlink.url,
+            start,
+            end,
+            category,
+            rule,
+            confidence,
+            "hyperlink_target",
+            affected_runs=(),
+            original_category=category,
+            hyperlink_url=hyperlink.url,
+        )
+
+
+def _append_property_candidates(
+    candidates: list[WordCandidate],
+    seen: set[tuple[str, str, int, int, str, str]],
+    inventory: WordStructureInventory,
+    property_name: str,
+    value: str,
+    detector: JapanesePresidioDetector,
+) -> None:
+    paragraph = WordParagraphText(
+        story_type="document_property",
+        section_index=None,
+        container_type="property",
+        paragraph_index=0,
+        text=value,
+        element_path=f"docProps/core.xml/{property_name}",
+        part_name="/docProps/core.xml",
+    )
+    for start, end, category, rule, confidence, original_category in _word_detector_results(value, detector):
+        _append_candidate(
+            candidates,
+            seen,
+            inventory,
+            paragraph,
+            value,
+            start,
+            end,
+            category,
+            rule,
+            confidence,
+            "document_property",
+            affected_runs=(),
+            original_category=original_category,
+            property_name=property_name,
+        )
+
+
+def _append_candidate(
+    candidates: list[WordCandidate],
+    seen: set[tuple[str, str, int, int, str, str]],
+    inventory: WordStructureInventory,
+    paragraph: WordParagraphText,
+    source_text: str,
+    start: int,
+    end: int,
+    category: str,
+    detection_rule: str,
+    confidence: float,
+    source: str,
+    *,
+    affected_runs: tuple[int, ...],
+    original_category: str,
+    hyperlink_url: str | None = None,
+    property_name: str | None = None,
+) -> None:
+    if start < 0 or end <= start or end > len(source_text):
+        return
+    value = source_text[start:end]
+    if not value.strip():
+        return
+    location_id = _paragraph_location_id(paragraph)
+    key = (location_id, category, start, end, value, source)
+    if key in seen:
+        return
+    seen.add(key)
+    candidates.append(
+        WordCandidate(
+            candidate_id=_candidate_id(inventory.source_sha256, location_id, category, start, end, value, source),
+            category=category,
+            story_type=paragraph.story_type,
+            section_index=paragraph.section_index,
+            container_type=paragraph.container_type,
+            paragraph_index=paragraph.paragraph_index,
+            table_index=paragraph.table_index,
+            row_index=paragraph.row_index,
+            cell_index=paragraph.cell_index,
+            cell_paragraph_index=paragraph.cell_paragraph_index,
+            header_footer_type=paragraph.header_footer_type,
+            location_id=location_id,
+            char_start=start,
+            char_end=end,
+            text=value,
+            detection_rule=detection_rule,
+            confidence=confidence,
+            source=source,
+            affected_run_indices=affected_runs,
+            context_before=source_text[max(0, start - 12) : start],
+            context_after=source_text[end : min(len(source_text), end + 12)],
+            original_category=original_category,
+            hyperlink_url=hyperlink_url,
+            property_name=property_name,
+        )
+    )
+
+
+def _word_detector_results(text: str, detector: JapanesePresidioDetector) -> list[tuple[int, int, str, str, float, str]]:
+    results: list[tuple[int, int, str, str, float, str]] = []
+    for detector_result in detector.analyze(text):
+        label = _normalize_word_category(entity_label(detector_result.entity_type))
+        if label not in WORD_CANDIDATE_CATEGORIES:
+            continue
+        start, end = _trim_candidate_span(text, detector_result.start, detector_result.end, label)
+        results.append((start, end, label, "JapanesePresidioDetector", float(detector_result.score), detector_result.entity_type))
+    results.extend(_regex_candidate_results(text))
+    return _select_non_overlapping_word_results(text, results)
+
+
+def _regex_candidate_results(text: str) -> list[tuple[int, int, str, str, float, str]]:
+    results: list[tuple[int, int, str, str, float, str]] = []
+    rules = (
+        (
+            "会社名",
+            r"(?:株式会社|有限会社|合同会社|医療法人|学校法人|社会福祉法人)[一-龯々〆ヵヶぁ-んァ-ヶーA-Za-z0-9]{2,24}",
+            "word_company_prefix",
+            0.88,
+        ),
+        (
+            "会社名",
+            r"[一-龯々〆ヵヶぁ-んァ-ヶーA-Za-z0-9]{2,24}(?:株式会社|有限会社|合同会社)",
+            "word_company_suffix",
+            0.84,
+        ),
+        (
+            "会社名",
+            r"(?:会社名|法人名|取引先|顧客企業)[:：]\s*([一-龯々〆ヵヶぁ-んァ-ヶーA-Za-z0-9]{2,24})",
+            "word_company_label",
+            0.82,
+        ),
+        (
+            "銀行名",
+            r"(?:銀行名|金融機関|振込先|口座)[:：は\s]*([一-龯々〆ヵヶぁ-んァ-ヶーA-Za-z0-9]{2,20}(?:銀行|信用金庫|信用組合))",
+            "word_bank_label",
+            0.90,
+        ),
+        (
+            "銀行名",
+            r"([一-龯々〆ヵヶぁ-んァ-ヶーA-Za-z0-9]{2,20}(?:銀行|信用金庫|信用組合))",
+            "word_bank_name",
+            0.86,
+        ),
+        (
+            "氏名",
+            r"([一-龯々〆ヵヶ]{1,4}[ 　]+[一-龯々〆ヵヶ]{1,5})",
+            "word_japanese_full_name_space",
+            0.70,
+        ),
+    )
+    for category, pattern, rule, confidence in rules:
+        for match in re.finditer(pattern, text):
+            start, end = match.span(1) if match.lastindex else match.span()
+            start, end = _trim_candidate_span(text, start, end, category)
+            value = text[start:end]
+            if _is_generic_word_false_positive(category, value):
+                continue
+            results.append((start, end, category, rule, confidence, category))
+    return results
+
+
+def _url_candidate_results(url: str) -> list[tuple[int, int, str, str, float]]:
+    results: list[tuple[int, int, str, str, float]] = []
+    for match in re.finditer(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", url):
+        results.append((match.start(), match.end(), "メールアドレス", "url_email", 0.92))
+    for match in re.finditer(r"(?:name|person|user|contact)=([A-Za-z][A-Za-z.\-_%]{2,60})", url, flags=re.IGNORECASE):
+        start, end = match.span(1)
+        results.append((start, end, "氏名", "url_name_like_parameter", 0.45))
+    return results
+
+
+def _select_non_overlapping_word_results(
+    text: str,
+    results: list[tuple[int, int, str, str, float, str]],
+) -> list[tuple[int, int, str, str, float, str]]:
+    candidates = [
+        item
+        for item in results
+        if 0 <= item[0] < item[1] <= len(text) and len(text[item[0] : item[1]].strip()) >= 2
+    ]
+    candidates.sort(key=lambda item: (item[4], item[1] - item[0]), reverse=True)
+    selected: list[tuple[int, int, str, str, float, str]] = []
+    occupied_by_category: dict[str, list[range]] = {}
+    for item in candidates:
+        start, end, category, *_rest = item
+        current = range(start, end)
+        if any(current.start < existing.stop and existing.start < current.stop for existing in occupied_by_category.get(category, [])):
+            continue
+        selected.append(item)
+        occupied_by_category.setdefault(category, []).append(current)
+    selected.sort(key=lambda item: (item[0], item[1], item[2]))
+    return selected
+
+
+def _normalize_word_category(category: str) -> str:
+    mapping = {
+        "PERSON": "氏名",
+        "個人名": "氏名",
+        "氏名候補": "氏名",
+        "組織名": "会社名",
+        "法人名": "会社名",
+        "会社": "会社名",
+        "電話": "電話番号",
+        "メール": "メールアドレス",
+        "銀行口座": "銀行名",
+        "金融機関": "銀行名",
+    }
+    return mapping.get(category, category)
+
+
+def _trim_candidate_span(text: str, start: int, end: int, category: str) -> tuple[int, int]:
+    value = text[start:end]
+    prefix_patterns = {
+        "会社名": r"^(?:会社名|法人名|取引先|顧客企業)[:：は\s]*",
+        "住所": r"^(?:送付先住所|住所|所在地|送付先|連絡先)[:：は\s]*",
+        "銀行名": r"^(?:銀行名|金融機関|振込先|口座)[:：は\s]*",
+    }
+    prefix_match = re.match(prefix_patterns.get(category, r"$^"), value)
+    if prefix_match:
+        start += prefix_match.end()
+        value = text[start:end]
+
+    if category in {"会社名", "住所", "銀行名"}:
+        stop_match = re.search(r"(?:です|でした|ます|ました|[。、「」,，]|(?<=[一-龯々〆ヵヶぁ-んァ-ヶーA-Za-z0-9])(?:は|を|が|に|へ|で|と)(?=[一-龯々〆ヵヶぁ-んァ-ヶー]))", value)
+        if stop_match and stop_match.start() > 0:
+            end = start + stop_match.start()
+            value = text[start:end]
+
+    while start < end and text[start] in " \t　:：":
+        start += 1
+    while end > start and text[end - 1] in " \t　。、「」,，です":
+        end -= 1
+    return start, end
+
+
+def _is_generic_word_false_positive(category: str, value: str) -> bool:
+    normalized = value.strip()
+    if category == "銀行名" and normalized in {"銀行", "銀行名", "金融機関"}:
+        return True
+    if category == "会社名" and normalized in {"会社", "会社名", "法人名"}:
+        return True
+    if category == "氏名" and any(word in normalized for word in ("銀行", "支店", "会社", "法人")):
+        return True
+    return False
+
+
+def _affected_run_indices(runs: tuple[WordTextRun, ...], start: int, end: int) -> tuple[int, ...]:
+    return tuple(
+        run.run_index
+        for run in runs
+        if start < run.char_end and run.char_start < end
+    )
+
+
+def _runs_by_paragraph_location(runs: tuple[WordTextRun, ...]) -> dict[str, tuple[WordTextRun, ...]]:
+    grouped: dict[str, list[WordTextRun]] = {}
+    for run in runs:
+        grouped.setdefault(_run_paragraph_location_id(run), []).append(run)
+    return {key: tuple(sorted(value, key=lambda item: item.run_index)) for key, value in grouped.items()}
+
+
+def _paragraph_location_id(paragraph: WordParagraphText) -> str:
+    values = [
+        paragraph.story_type,
+        str(paragraph.section_index),
+        paragraph.header_footer_type or "",
+        paragraph.container_type,
+        str(paragraph.table_index),
+        str(paragraph.row_index),
+        str(paragraph.cell_index),
+        str(paragraph.paragraph_index),
+        str(paragraph.cell_paragraph_index),
+        paragraph.part_name,
+        paragraph.element_path,
+    ]
+    return ":".join(values)
+
+
+def _run_paragraph_location_id(run: WordTextRun) -> str:
+    values = [
+        run.story_type,
+        str(run.section_index),
+        run.header_footer_type or "",
+        run.container_type,
+        str(run.table_index),
+        str(run.row_index),
+        str(run.cell_index),
+        str(run.paragraph_index),
+        str(run.cell_paragraph_index),
+        run.part_name,
+        run.element_path.rsplit("/r[", 1)[0],
+    ]
+    return ":".join(values)
+
+
+def _candidate_id(
+    source_sha256: str,
+    location_id: str,
+    category: str,
+    start: int,
+    end: int,
+    text: str,
+    source: str,
+) -> str:
+    payload = "|".join([source_sha256, location_id, category, str(start), str(end), text, source])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _document_property_values(properties: WordDocumentProperties) -> tuple[tuple[str, str], ...]:
+    return (
+        ("author", properties.author),
+        ("last_modified_by", properties.last_modified_by),
+        ("title", properties.title),
+        ("subject", properties.subject),
+        ("keywords", properties.keywords),
+        ("category", properties.category),
+        ("comments", properties.comments),
+        ("content_status", properties.content_status),
+        ("identifier", properties.identifier),
+        ("language", properties.language),
+        ("version", properties.version),
     )
 
 

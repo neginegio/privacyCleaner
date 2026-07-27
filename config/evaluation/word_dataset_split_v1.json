@@ -1,0 +1,18 @@
+{
+  "dataset_version": "word_dataset_split_v1",
+  "development": {
+    "synthetic_phase2_docx": {
+      "generator": "tools/test_word_candidate_detection.py:create_development_docx",
+      "note": "Generated synthetic development data only. Regenerated during tests."
+    }
+  },
+  "validation": {
+    "reserved": true,
+    "note": "Do not use validation data for Phase 2 rule tuning."
+  },
+  "holdout": {
+    "reserved": true,
+    "note": "Do not inspect or use holdout data during implementation."
+  },
+  "leakage_guard": "Candidate generation code must not read this file."
+}
