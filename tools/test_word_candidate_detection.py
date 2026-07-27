@@ -28,6 +28,11 @@ BANNED_GENERATION_TOKENS = (
     "未来会議",
     "山田",
     "佐藤",
+    "星雲商事",
+    "北斗物流",
+    "白樺",
+    "鈴木花子",
+    "青葉ビル",
 )
 BANNED_FIXED_LOCATION_PATTERNS = (
     r"paragraph_index\s*==\s*\d+",
@@ -217,7 +222,48 @@ def contamination_guard() -> list[str]:
     return failures
 
 
+def run_phase2_1_unit_tests() -> None:
+    with tempfile.TemporaryDirectory(prefix="word_phase2_1_units_") as tmpdir:
+        docx_path = Path(tmpdir) / "word_phase2_1_units.docx"
+        document = Document()
+        document.add_paragraph("配送担当は北斗物流株式会社です。")
+        document.add_paragraph("共同研究先は合同会社青葉研究所です。")
+        document.add_paragraph("法人格のみ: 株式会社")
+        document.add_paragraph("法人格を含まない組織として白樺ラボを記載します。")
+        document.add_paragraph("会社の方針を確認します。")
+        document.add_paragraph("連絡者は鈴木花子です。")
+        document.add_paragraph("一般文章として南側の入口、森を抜ける話です。")
+        document.add_paragraph("住所: 京都府京都市下京区烏丸通1-2 青葉ビル5階")
+        document.add_paragraph("所在地: 東京都千代田区丸の内1-1-1 5階")
+        document.add_paragraph("市区町村の制度について説明します。")
+        document.add_paragraph("東京都の政策を確認します。")
+        document.add_paragraph("送付先住所は東京都千代田区丸の内1-1-1です。")
+        document.save(docx_path)
+
+        inventory = extract_word_structure(docx_path)
+        candidates = candidates_for_inventory(inventory)
+        by_text_category = {(candidate.text, candidate.category) for candidate in candidates}
+        candidate_texts = {candidate.text for candidate in candidates}
+
+        assert_true(("北斗物流株式会社", "会社名") in by_text_category, "Suffix company should keep the exact company span")
+        assert_true(("合同会社青葉研究所", "会社名") in by_text_category, "Prefix company should still be detected")
+        assert_true(("配送担当", "会社名") not in by_text_category, "Particle-leading context should not be included as company")
+        assert_true(("共同研究先", "会社名") not in by_text_category, "Context label should not become a company")
+        assert_true(("株式会社", "会社名") not in by_text_category, "Designator alone should not be a company")
+        assert_true(("北斗物流株式会社", "氏名") not in by_text_category, "Corporate names should not remain as person candidates")
+        assert_true(("白樺ラボ", "会社名") in by_text_category, "Contextual organization should be detected with clear evidence")
+        assert_true(("会社", "会社名") not in by_text_category, "Generic company word should not be a candidate")
+        assert_true(("鈴木花子", "氏名") in by_text_category, "Person role label should detect a no-space Japanese name")
+        assert_true("南側" not in candidate_texts and "森" not in candidate_texts, "Name-like general words should not be candidates")
+        assert_true(("京都府京都市下京区烏丸通1-2 青葉ビル5階", "住所") in by_text_category, "Address should include building name")
+        assert_true(("東京都千代田区丸の内1-1-1 5階", "住所") in by_text_category, "Address should include floor")
+        assert_true(("市区町村の制度", "住所") not in by_text_category, "General municipality sentence should not be an address")
+        assert_true(all(not (candidate.text == "東京都の政策" and candidate.category == "住所") for candidate in candidates), "General Tokyo policy sentence should not be an address")
+        assert_true(("東京都千代田区丸の内1-1-1", "住所") in by_text_category, "Normal address should still be detected")
+
+
 def main() -> int:
+    run_phase2_1_unit_tests()
     with tempfile.TemporaryDirectory(prefix="word_phase2_dev_") as tmpdir:
         tmp = Path(tmpdir)
         docx_path = tmp / "word_phase2_development.docx"

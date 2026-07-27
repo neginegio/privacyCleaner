@@ -20,6 +20,9 @@ W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 WORD_CANDIDATE_CATEGORIES = {"会社名", "氏名", "住所", "電話番号", "メールアドレス", "銀行名"}
+COMPANY_DESIGNATORS = ("株式会社", "有限会社", "合同会社", "医療法人", "学校法人", "社会福祉法人")
+COMPANY_SUFFIX_DESIGNATORS = ("株式会社", "有限会社", "合同会社")
+WORD_NAME_CHARS = r"一-龯々〆ヵヶぁ-んァ-ヶーA-Za-z0-9"
 
 
 class UnsupportedWordDocumentError(RuntimeError):
@@ -708,6 +711,12 @@ def _word_detector_results(text: str, detector: JapanesePresidioDetector) -> lis
         if label not in WORD_CANDIDATE_CATEGORIES:
             continue
         start, end = _trim_candidate_span(text, detector_result.start, detector_result.end, label)
+        if label == "住所":
+            start, end = _extend_address_span(text, start, end)
+            if _is_weak_address_candidate(text[start:end]):
+                continue
+        if _is_generic_word_false_positive(label, text[start:end]):
+            continue
         results.append((start, end, label, "JapanesePresidioDetector", float(detector_result.score), detector_result.entity_type))
     results.extend(_regex_candidate_results(text))
     return _select_non_overlapping_word_results(text, results)
@@ -715,19 +724,9 @@ def _word_detector_results(text: str, detector: JapanesePresidioDetector) -> lis
 
 def _regex_candidate_results(text: str) -> list[tuple[int, int, str, str, float, str]]:
     results: list[tuple[int, int, str, str, float, str]] = []
+    results.extend(_company_designator_results(text))
+    results.extend(_contextual_organization_results(text))
     rules = (
-        (
-            "会社名",
-            r"(?:株式会社|有限会社|合同会社|医療法人|学校法人|社会福祉法人)[一-龯々〆ヵヶぁ-んァ-ヶーA-Za-z0-9]{2,24}",
-            "word_company_prefix",
-            0.88,
-        ),
-        (
-            "会社名",
-            r"[一-龯々〆ヵヶぁ-んァ-ヶーA-Za-z0-9]{2,24}(?:株式会社|有限会社|合同会社)",
-            "word_company_suffix",
-            0.84,
-        ),
         (
             "会社名",
             r"(?:会社名|法人名|取引先|顧客企業)[:：]\s*([一-龯々〆ヵヶぁ-んァ-ヶーA-Za-z0-9]{2,24})",
@@ -752,6 +751,12 @@ def _regex_candidate_results(text: str) -> list[tuple[int, int, str, str, float,
             "word_japanese_full_name_space",
             0.70,
         ),
+        (
+            "氏名",
+            r"(?:担当者|連絡者|確認者|責任者|代表者)\s*[:：は]\s*([一-龯々〆ヵヶ]{2,6})(?![ 　])",
+            "word_person_role_label",
+            0.76,
+        ),
     )
     for category, pattern, rule, confidence in rules:
         for match in re.finditer(pattern, text):
@@ -761,6 +766,57 @@ def _regex_candidate_results(text: str) -> list[tuple[int, int, str, str, float,
             if _is_generic_word_false_positive(category, value):
                 continue
             results.append((start, end, category, rule, confidence, category))
+    return results
+
+
+def _company_designator_results(text: str) -> list[tuple[int, int, str, str, float, str]]:
+    results: list[tuple[int, int, str, str, float, str]] = []
+    designator_pattern = "|".join(re.escape(value) for value in COMPANY_DESIGNATORS)
+    suffix_pattern = "|".join(re.escape(value) for value in COMPANY_SUFFIX_DESIGNATORS)
+
+    for match in re.finditer(rf"(?:{designator_pattern})[{WORD_NAME_CHARS}]{{2,24}}", text):
+        start, end = _trim_candidate_span(text, match.start(), match.end(), "会社名")
+        value = text[start:end]
+        if _has_company_name_body(value) and not _is_generic_word_false_positive("会社名", value):
+            results.append((start, end, "会社名", "word_company_prefix", 0.88, "会社名"))
+
+    for match in re.finditer(rf"[{WORD_NAME_CHARS}]{{2,30}}(?:{suffix_pattern})", text):
+        suffix_start = _company_suffix_start(text, match.start(), match.end())
+        start, end = _trim_candidate_span(text, suffix_start, match.end(), "会社名")
+        value = text[start:end]
+        if _has_company_name_body(value) and not _is_generic_word_false_positive("会社名", value):
+            results.append((start, end, "会社名", "word_company_suffix", 0.86, "会社名"))
+    return results
+
+
+def _company_suffix_start(text: str, start: int, end: int) -> int:
+    segment = text[start:end]
+    adjusted = start
+    for index, char in enumerate(segment):
+        if char in " \t　:：、。，,/／「」『』（）()はをがにへでと":
+            adjusted = start + index + 1
+    return adjusted
+
+
+def _has_company_name_body(value: str) -> bool:
+    normalized = value.strip()
+    for designator in COMPANY_DESIGNATORS:
+        if normalized.startswith(designator):
+            return len(normalized) - len(designator) >= 2
+        if normalized.endswith(designator):
+            return len(normalized) - len(designator) >= 2
+    return False
+
+
+def _contextual_organization_results(text: str) -> list[tuple[int, int, str, str, float, str]]:
+    results: list[tuple[int, int, str, str, float, str]] = []
+    context_pattern = r"(?:組織として|取引先(?:として|は)?|販売先(?:として|は)?|委託先(?:として|は)?|共同研究先(?:として|は)?)\s*"
+    organization_pattern = rf"([{WORD_NAME_CHARS}]{{2,20}}(?:ラボ|研究所|センター|支店|本社|工場))"
+    for match in re.finditer(context_pattern + organization_pattern, text):
+        start, end = _trim_candidate_span(text, match.start(1), match.end(1), "会社名")
+        value = text[start:end]
+        if not any(designator in value for designator in COMPANY_DESIGNATORS) and not _is_generic_word_false_positive("会社名", value):
+            results.append((start, end, "会社名", "word_contextual_organization", 0.72, "会社名"))
     return results
 
 
@@ -840,13 +896,52 @@ def _trim_candidate_span(text: str, start: int, end: int, category: str) -> tupl
 
 def _is_generic_word_false_positive(category: str, value: str) -> bool:
     normalized = value.strip()
+    if category == "会社名" and normalized in set(COMPANY_DESIGNATORS):
+        return True
     if category == "銀行名" and normalized in {"銀行", "銀行名", "金融機関"}:
         return True
-    if category == "会社名" and normalized in {"会社", "会社名", "法人名"}:
+    if category == "会社名" and normalized in {"会社", "会社名", "法人名", "担当", "担当者"}:
         return True
-    if category == "氏名" and any(word in normalized for word in ("銀行", "支店", "会社", "法人")):
+    if category == "会社名" and not any(word in normalized for word in COMPANY_DESIGNATORS) and re.search(r"(?:担当者?|先)$", normalized) and len(normalized) <= 8:
+        return True
+    if category == "氏名" and any(word in normalized for word in ("銀行", "支店", "会社", "法人", "研究所", "センター", "ラボ", "工場")):
         return True
     return False
+
+
+def _extend_address_span(text: str, start: int, end: int) -> tuple[int, int]:
+    if not _address_has_strength(text[start:end]):
+        return start, end
+    suffix = text[end:]
+    building_match = re.match(
+        r"[ \t　]+(?:"
+        r"[一-龯々〆ヵヶぁ-んァ-ヶーA-Za-z0-9０-９\-－]{1,20}"
+        r"(?:ビル|マンション|号館|棟|タワー|ハイツ|レジデンス)"
+        r"[一-龯々〆ヵヶぁ-んァ-ヶーA-Za-z0-9０-９\-－]*(?:[0-9０-９一二三四五六七八九十百千]+(?:階|F|Ｆ|号室))?"
+        r"|[0-9０-９一二三四五六七八九十百千]+(?:階|F|Ｆ|号室)"
+        r")",
+        suffix,
+    )
+    if building_match:
+        end += building_match.end()
+    return start, end
+
+
+def _is_weak_address_candidate(value: str) -> bool:
+    normalized = value.strip()
+    if not _address_has_strength(normalized):
+        return True
+    if re.search(r"(?:制度|政策|説明|について)", normalized):
+        return True
+    return False
+
+
+def _address_has_strength(value: str) -> bool:
+    return bool(
+        re.search(r"[0-9０-９]", value)
+        or re.search(r"(?:丁目|番地|番|号|号室|〒)", value)
+        or re.search(r"[一二三四五六七八九十百千]+(?:丁目|番地|番|号)", value)
+    )
 
 
 def _affected_run_indices(runs: tuple[WordTextRun, ...], start: int, end: int) -> tuple[int, ...]:

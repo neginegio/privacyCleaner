@@ -1,0 +1,224 @@
+{
+  "baseline_name": "Word candidate detection Phase 2.1 validation",
+  "source": "working tree after 4fceb05 Record Word Phase 2 initial validation",
+  "status": "Word candidate detection Phase 2.1 frozen",
+  "evaluation_context": {
+    "development_baseline_metrics": {
+      "ground_truth_count": 16,
+      "candidate_count": 16,
+      "matched_ground_truth_count": 16,
+      "missed_ground_truth_count": 0,
+      "true_positive_candidate_count": 16,
+      "false_positive_candidate_count": 0,
+      "recall": 1.0,
+      "candidate_precision": 1.0,
+      "exact_span_match_count": 16
+    },
+    "validation_initial_metrics": {
+      "ground_truth_count": 24,
+      "candidate_count": 26,
+      "matched_ground_truth_count": 20,
+      "missed_ground_truth_count": 4,
+      "true_positive_candidate_count": 20,
+      "false_positive_candidate_count": 6,
+      "recall": 0.833,
+      "candidate_precision": 0.769,
+      "exact_span_match_count": 20
+    },
+    "phase2_1_post_tuning_validation_metrics": {
+      "ground_truth_count": 24,
+      "candidate_count": 24,
+      "matched_ground_truth_count": 24,
+      "missed_ground_truth_count": 0,
+      "true_positive_candidate_count": 24,
+      "false_positive_candidate_count": 0,
+      "recall": 1.0,
+      "candidate_precision": 1.0,
+      "exact_span_match_count": 24
+    },
+    "interpretation": "Phase 2.1 validation scores are post-tuning values after analyzing Validation Initial. They are not unknown Word generalization performance and are not holdout performance.",
+    "validation_dataset_status_after_phase2_1": "development/tuning evaluation data",
+    "rule_freeze_scope": [
+      "word_processor.py candidate generation rules",
+      "Presidio-related candidate settings",
+      "company/name/address regular expressions",
+      "category conflict handling",
+      "candidate span handling"
+    ]
+  },
+  "validation_docx_sha256": "028972970592182d8c8ccc1a48e0e591998c5ac1f6b088ad090f8efdc95fb1a8",
+  "ground_truth_sha256": "a036fd2711f0fd25c4b8d352db57566720ca14a6c17688952d697904f0b91810",
+  "initial_comparison": {
+    "initial_metrics": {
+      "ground_truth_count": 24,
+      "candidate_count": 26,
+      "matched_ground_truth_count": 20,
+      "missed_ground_truth_count": 4,
+      "true_positive_candidate_count": 20,
+      "false_positive_candidate_count": 6,
+      "recall": 0.833,
+      "candidate_precision": 0.769,
+      "exact_span_match_count": 20
+    },
+    "phase2_1_metrics": {
+      "ground_truth_count": 24,
+      "candidate_count": 24,
+      "matched_ground_truth_count": 24,
+      "missed_ground_truth_count": 0,
+      "true_positive_candidate_count": 24,
+      "false_positive_candidate_count": 0,
+      "recall": 1.0,
+      "candidate_precision": 1.0,
+      "exact_span_match_count": 24
+    },
+    "initial_category_results": {
+      "メールアドレス": {
+        "正解": 3,
+        "検出": 3,
+        "見逃し": 0,
+        "TP候補": 3,
+        "FP候補": 0
+      },
+      "会社名": {
+        "正解": 7,
+        "検出": 8,
+        "見逃し": 2,
+        "TP候補": 5,
+        "FP候補": 3
+      },
+      "住所": {
+        "正解": 3,
+        "検出": 4,
+        "見逃し": 1,
+        "TP候補": 2,
+        "FP候補": 2
+      },
+      "氏名": {
+        "正解": 6,
+        "検出": 6,
+        "見逃し": 1,
+        "TP候補": 5,
+        "FP候補": 1
+      },
+      "銀行名": {
+        "正解": 3,
+        "検出": 3,
+        "見逃し": 0,
+        "TP候補": 3,
+        "FP候補": 0
+      },
+      "電話番号": {
+        "正解": 2,
+        "検出": 2,
+        "見逃し": 0,
+        "TP候補": 2,
+        "FP候補": 0
+      }
+    },
+    "phase2_1_category_results": {
+      "メールアドレス": {
+        "正解": 3,
+        "検出": 3,
+        "見逃し": 0,
+        "TP候補": 3,
+        "FP候補": 0
+      },
+      "会社名": {
+        "正解": 7,
+        "検出": 7,
+        "見逃し": 0,
+        "TP候補": 7,
+        "FP候補": 0
+      },
+      "住所": {
+        "正解": 3,
+        "検出": 3,
+        "見逃し": 0,
+        "TP候補": 3,
+        "FP候補": 0
+      },
+      "氏名": {
+        "正解": 6,
+        "検出": 6,
+        "見逃し": 0,
+        "TP候補": 6,
+        "FP候補": 0
+      },
+      "銀行名": {
+        "正解": 3,
+        "検出": 3,
+        "見逃し": 0,
+        "TP候補": 3,
+        "FP候補": 0
+      },
+      "電話番号": {
+        "正解": 2,
+        "検出": 2,
+        "見逃し": 0,
+        "TP候補": 2,
+        "FP候補": 0
+      }
+    }
+  },
+  "metrics": {
+    "ground_truth_count": 24,
+    "candidate_count": 24,
+    "matched_ground_truth_count": 24,
+    "missed_ground_truth_count": 0,
+    "true_positive_candidate_count": 24,
+    "false_positive_candidate_count": 0,
+    "recall": 1.0,
+    "candidate_precision": 1.0,
+    "exact_span_match_count": 24
+  },
+  "category_results": {
+    "メールアドレス": {
+      "正解": 3,
+      "検出": 3,
+      "見逃し": 0,
+      "TP候補": 3,
+      "FP候補": 0
+    },
+    "会社名": {
+      "正解": 7,
+      "検出": 7,
+      "見逃し": 0,
+      "TP候補": 7,
+      "FP候補": 0
+    },
+    "住所": {
+      "正解": 3,
+      "検出": 3,
+      "見逃し": 0,
+      "TP候補": 3,
+      "FP候補": 0
+    },
+    "氏名": {
+      "正解": 6,
+      "検出": 6,
+      "見逃し": 0,
+      "TP候補": 6,
+      "FP候補": 0
+    },
+    "銀行名": {
+      "正解": 3,
+      "検出": 3,
+      "見逃し": 0,
+      "TP候補": 3,
+      "FP候補": 0
+    },
+    "電話番号": {
+      "正解": 2,
+      "検出": 2,
+      "見逃し": 0,
+      "TP候補": 2,
+      "FP候補": 0
+    }
+  },
+  "remaining_missed": [],
+  "remaining_false_positive": [],
+  "method": {
+    "formal_true_positive": "same location_id, normalized category, exact char_start, exact char_end",
+    "validation_initial_record_rewritten": false
+  }
+}
