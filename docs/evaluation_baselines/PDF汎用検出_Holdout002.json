@@ -1,0 +1,130 @@
+{
+  "evaluation_name": "Generation3 complete holdout evaluation 002",
+  "status": "final",
+  "dataset_position": "Generation3 完全ホールドアウト評価②（評価済み）",
+  "generation": {
+    "tag": "pdf-generation3",
+    "commit": "2ab576ddc75c7493ad9629675ef145dde7a1dc32",
+    "frozen_before_evaluation": true
+  },
+  "document": {
+    "holdout_id": "Holdout002",
+    "page_count": 17,
+    "ground_truth_count": 49,
+    "pdf_sha256": "ce8a2f4749381fcd21bbb392190e6fd2f84ee339a955c1a4f229e9b4889d362b"
+  },
+  "input_integrity": {
+    "initial_candidate_csv_sha256": "80fd87127639becc522c3a1bf4cf8046ac204042125415dbc569953bac44668f",
+    "ground_truth_csv_sha256": "afaa5fc3887e603e924cfd49cf6da7cba31efacc13a7afdd4b4df77571c8aa5c",
+    "all_expected_hashes_matched": true
+  },
+  "evaluation_method_identity": {
+    "same_as_generation3_development_metrics": true,
+    "common_function_reused": false,
+    "common_function_note": "Holdout002のGit管理外評価スクリプトは、Generation3開発時の正式評価ロジックと同じ定義を複製して使用した。矩形マッチングは同一ページ、正規化後カテゴリ一致、coverage >= 0.85。",
+    "coverage_definition": "intersection_area / ground_truth_area",
+    "matched_ground_truth_count_definition": "1つ以上の有効候補に一致した正解矩形数",
+    "true_positive_candidate_count_definition": "1つ以上の正解矩形と有効に一致した候補数",
+    "false_positive_candidate_count_definition": "正解矩形と一致しなかった候補数",
+    "recall_definition": "matched_ground_truth_count / ground_truth_count",
+    "candidate_precision_definition": "true_positive_candidate_count / candidate_count",
+    "holdout002_specific_threshold_or_rule": false
+  },
+  "evaluation_process": {
+    "initial_candidates_fixed_before_ground_truth_review": true,
+    "ground_truth_created_independently_without_candidate_overlay": true,
+    "candidate_generation_changed": false,
+    "ocr_settings_changed": false,
+    "evaluation_method_changed": false,
+    "threshold_changed_after_result": false,
+    "cause_analysis_performed": false,
+    "generation4_considered": false,
+    "leakage_prevention_audit": "9/9 PASS"
+  },
+  "ground_truth_review_ui": {
+    "resize_by_dragging_edges_and_corners": true,
+    "ctrl_mouse_wheel_zoom": true,
+    "window_maximize": true,
+    "pdf_view_area_maximize": true,
+    "git_tracked": false,
+    "affected_generation3_candidate_generation": false,
+    "affected_ocr": false,
+    "affected_evaluation_method": false,
+    "affected_initial_candidates": false,
+    "initial_candidate_csv_displayed_or_referenced": false,
+    "candidate_coordinates_displayed_or_referenced": false,
+    "candidate_count_displayed_or_referenced": false,
+    "candidate_reason_displayed_or_referenced": false
+  },
+  "ocr": {
+    "page_count": 17,
+    "review_required_pages": 17,
+    "failed_pages": 0
+  },
+  "metrics": {
+    "ground_truth_count": 49,
+    "candidate_count": 2,
+    "matched_ground_truth_count": 0,
+    "missed_ground_truth_count": 49,
+    "true_positive_candidate_count": 0,
+    "false_positive_candidate_count": 2,
+    "recall": 0.0,
+    "candidate_precision": 0.0,
+    "average_coverage": 0.0,
+    "minimum_coverage": 0.0
+  },
+  "category_metrics": {
+    "company_name": {
+      "ground_truth": 49,
+      "matched": 0,
+      "missed": 49
+    },
+    "candidate_side_person_name_candidate": {
+      "true_positive": 0,
+      "false_positive": 1
+    },
+    "candidate_side_person_name": {
+      "true_positive": 0,
+      "false_positive": 1
+    }
+  },
+  "holdout_reference_summary": {
+    "holdout001": {
+      "ground_truth": 10,
+      "matched": 0,
+      "candidate_count": 5,
+      "true_positive": 0,
+      "false_positive": 5
+    },
+    "holdout002": {
+      "ground_truth": 49,
+      "matched": 0,
+      "candidate_count": 2,
+      "true_positive": 0,
+      "false_positive": 2
+    },
+    "two_document_reference_total": {
+      "ground_truth": 59,
+      "matched": 0,
+      "candidate_count": 7,
+      "true_positive": 0,
+      "false_positive": 7,
+      "note": "2文書に対する参考集計"
+    }
+  },
+  "interpretation": "Generation3の完全未使用PDFによる第2回ホールドアウト評価では、17ページ・正解49件の単一文書に対してRecall 0.000 / Candidate Precision 0.000だった。この結果はGeneration3の未知文書全般の性能が0であると断定するものではない。",
+  "future_use_policy": {
+    "final_result_will_not_be_changed": true,
+    "if_used_for_cause_analysis_or_generation4_development": "その時点からこのPDFは開発・分析データとして扱い、Generation4以降の完全ホールドアウト評価には再利用しない。"
+  },
+  "sensitive_data_policy": {
+    "contains_pdf_original": false,
+    "contains_ocr_original_text": false,
+    "contains_company_names": false,
+    "contains_person_names": false,
+    "contains_ground_truth_coordinates": false,
+    "contains_candidate_coordinates": false,
+    "contains_ground_truth_csv_content": false,
+    "contains_initial_candidate_csv_content": false
+  }
+}

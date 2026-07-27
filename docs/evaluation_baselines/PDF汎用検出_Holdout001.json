@@ -1,0 +1,87 @@
+{
+  "evaluation_name": "Generation3 complete holdout evaluation 001",
+  "status": "final",
+  "dataset_position": "Generation3 完全ホールドアウト評価①（評価済み）",
+  "generation": {
+    "tag": "pdf-generation3",
+    "commit": "2ab576ddc75c7493ad9629675ef145dde7a1dc32",
+    "frozen_before_evaluation": true
+  },
+  "document": {
+    "holdout_id": "Holdout001",
+    "page_count": 1,
+    "ground_truth_count": 10,
+    "pdf_sha256": "d8bf1260a3c17fa9bc7b06fe402c8d1a6af2793308bd0c51de8e5a0219a32559"
+  },
+  "input_integrity": {
+    "initial_candidate_csv_sha256": "47299e98ee066a2d51feec9eb1a69961a1c1c94dddd2dcf8aa05c2e16f4c0684",
+    "ground_truth_csv_sha256": "58c62f6780eff6879370fd436980544912549be2e5cf084aea036969d5d3def8",
+    "all_expected_hashes_matched": true
+  },
+  "evaluation_process": {
+    "initial_candidates_fixed_before_ground_truth_review": true,
+    "ground_truth_created_independently_without_candidate_overlay": true,
+    "candidate_generation_changed": false,
+    "ocr_settings_changed": false,
+    "evaluation_method_changed": false,
+    "threshold_changed_after_result": false,
+    "cause_analysis_performed": false,
+    "leakage_prevention_audit": "9/9 PASS"
+  },
+  "ocr": {
+    "quality": "REVIEW_REQUIRED",
+    "ocr_text_chars": 1471,
+    "coordinate_word_count": 337,
+    "failed_pages": 0
+  },
+  "metrics": {
+    "ground_truth_count": 10,
+    "candidate_count": 5,
+    "matched_ground_truth_count": 0,
+    "missed_ground_truth_count": 10,
+    "true_positive_candidate_count": 0,
+    "false_positive_candidate_count": 5,
+    "recall": 0.0,
+    "candidate_precision": 0.0,
+    "average_coverage": 0.0,
+    "minimum_coverage": 0.0
+  },
+  "category_metrics": {
+    "company_name": {
+      "ground_truth": 5,
+      "matched": 0,
+      "missed": 5
+    },
+    "person_name": {
+      "ground_truth": 5,
+      "matched": 0,
+      "missed": 5
+    },
+    "candidate_side_company_name": {
+      "candidate_count": 5,
+      "true_positive": 0,
+      "false_positive": 5
+    }
+  },
+  "comparison_with_development_dataset_v1": {
+    "development_recall": 0.612,
+    "development_candidate_precision": 0.714,
+    "holdout001_recall": 0.0,
+    "holdout001_candidate_precision": 0.0,
+    "interpretation": "開発データセットv1ではRecall 0.612 / Candidate Precision 0.714だったが、完全ホールドアウト評価①では双方0.000となり、この帳票形式への汎化性能が確認できなかった。これは1ページ、正解10件の単一文書に対する結果であり、Generation3がすべての未知PDFで性能0であることは意味しない。"
+  },
+  "future_use_policy": {
+    "final_result_will_not_be_changed": true,
+    "if_used_for_cause_analysis_or_generation4_development": "その時点からこのPDFは開発・分析データとして扱い、Generation4以降の完全ホールドアウト評価には再利用しない。"
+  },
+  "sensitive_data_policy": {
+    "contains_pdf_original": false,
+    "contains_ocr_original_text": false,
+    "contains_company_names": false,
+    "contains_person_names": false,
+    "contains_ground_truth_coordinates": false,
+    "contains_candidate_coordinates": false,
+    "contains_ground_truth_csv_content": false,
+    "contains_initial_candidate_csv_content": false
+  }
+}
