@@ -1,0 +1,115 @@
+{
+  "baseline_name": "Word candidate detection Holdout002",
+  "holdout_id": "Holdout002",
+  "evaluated_at_utc": "2026-07-27T15:40:48.420161+00:00",
+  "phase2_1_frozen_commit": "ca7b01e",
+  "word_sha256": "074ad48cb816f6e93f506fbd3c8b0e776320954aa439bbd35633c4f0d5311b14",
+  "candidate_sha256": "5b119540ac590d7c5ed002e32c40252a7c63ecf551d2b73f128c304a946dee99",
+  "ground_truth_sha256": "689f2e30128857d2e373c616f5c0505cc382431654f0ed220f1bc902cb1630d4",
+  "candidate_count_fixed_before_evaluation": 16,
+  "ground_truth_count_completed_before_evaluation": 10,
+  "formal_scope": {
+    "included_story_types": [
+      "body",
+      "header",
+      "footer"
+    ],
+    "included_container_types": [
+      "paragraph",
+      "table_cell"
+    ],
+    "excluded": [
+      "document_property",
+      "unsupported Word regions"
+    ]
+  },
+  "matching_method": {
+    "true_positive": "same location_id, normalized category, exact char_start, exact char_end",
+    "partial_match_is_true_positive": false,
+    "one_candidate_can_match_multiple_truths": false
+  },
+  "metrics": {
+    "ground_truth_count": 9,
+    "candidate_count": 16,
+    "matched_ground_truth_count": 4,
+    "missed_ground_truth_count": 5,
+    "true_positive_candidate_count": 4,
+    "false_positive_candidate_count": 12,
+    "recall": 0.444,
+    "candidate_precision": 0.25,
+    "exact_span_match_count": 4
+  },
+  "category_results": {
+    "メールアドレス": {
+      "ground_truth_count": 1,
+      "candidate_count": 1,
+      "matched": 1,
+      "missed": 0,
+      "true_positive_candidate": 1,
+      "false_positive_candidate": 0
+    },
+    "会社名": {
+      "ground_truth_count": 1,
+      "candidate_count": 1,
+      "matched": 0,
+      "missed": 1,
+      "true_positive_candidate": 0,
+      "false_positive_candidate": 1
+    },
+    "住所": {
+      "ground_truth_count": 1,
+      "candidate_count": 1,
+      "matched": 0,
+      "missed": 1,
+      "true_positive_candidate": 0,
+      "false_positive_candidate": 1
+    },
+    "氏名": {
+      "ground_truth_count": 3,
+      "candidate_count": 11,
+      "matched": 1,
+      "missed": 2,
+      "true_positive_candidate": 1,
+      "false_positive_candidate": 10
+    },
+    "銀行名": {
+      "ground_truth_count": 1,
+      "candidate_count": 0,
+      "matched": 0,
+      "missed": 1,
+      "true_positive_candidate": 0,
+      "false_positive_candidate": 0
+    },
+    "電話番号": {
+      "ground_truth_count": 2,
+      "candidate_count": 2,
+      "matched": 2,
+      "missed": 0,
+      "true_positive_candidate": 2,
+      "false_positive_candidate": 0
+    }
+  },
+  "missed_cause_counts": {
+    "span過大": 3,
+    "候補自体が生成されなかった": 2
+  },
+  "false_positive_cause_counts": {
+    "span過大": 3,
+    "一般語誤検出": 9
+  },
+  "metadata_ground_truth_count": 1,
+  "unsupported_handling": "Unsupported regions are recorded as a separate safety issue and are not included in the Phase 2.1 formal recall denominator.",
+  "evaluation_interpretation": [
+    "Holdout002 is a completely unused real Word document evaluated after the Phase 2.1 frozen commit.",
+    "Initial candidates were generated and fixed before ground truth creation.",
+    "Human ground truth was created independently without viewing candidate contents.",
+    "Candidate and ground truth were compared for the first time only after ground truth completion.",
+    "This is an unknown-real-document evaluation for Phase 2.1.",
+    "Development and post-tuning Validation 1.0/1.0 results must be kept separate from this holdout result.",
+    "A single holdout document is not enough to make a general claim about Word-wide performance.",
+    "Company names and personal names dropped substantially: company matched 0/1, person matched 1/3.",
+    "2 of 5 missed ground truths had no generated candidate, so the drop is not explained only by strict exact-span matching."
+  ],
+  "privacy_note": "This public record intentionally excludes original text, candidate text, ground truth text, and detailed spans containing real information.",
+  "private_error_details_sha256": "d6366509c62acd6958dde4c9c6bb09128fbdad59ce8cddbb66391f9bd88ef795"
+}
