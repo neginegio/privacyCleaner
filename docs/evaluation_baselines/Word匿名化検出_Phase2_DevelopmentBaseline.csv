@@ -1,0 +1,20 @@
+項目,値,備考
+baseline_name,Word candidate detection Phase 2 development baseline,
+dataset,synthetic development Word,
+source_commit,441d588,
+ground_truth_count,16,
+candidate_count,16,
+matched_ground_truth_count,16,
+missed_ground_truth_count,0,
+true_positive_candidate_count,16,
+false_positive_candidate_count,0,
+recall,1.0,development合成Word上の結果でありvalidation/holdout性能ではない
+candidate_precision,1.0,development合成Word上の結果でありvalidation/holdout性能ではない
+exact_span_match_count,16,
+category_会社名,5/5,
+category_氏名,5/5,
+category_住所,1/1,
+category_電話番号,1/1,
+category_メールアドレス,3/3,
+category_銀行名,1/1,
+limitation,development-only,未知Word性能を示さない

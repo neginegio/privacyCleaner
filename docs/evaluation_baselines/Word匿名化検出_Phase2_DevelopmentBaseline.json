@@ -1,0 +1,30 @@
+{
+  "baseline_name": "Word candidate detection Phase 2 development baseline",
+  "dataset": "synthetic development Word",
+  "source_commit": "441d588",
+  "scope": "Phase 2 candidate detection only; no Word rewriting, pseudonymization, review UI, or output generation.",
+  "metrics": {
+    "ground_truth_count": 16,
+    "candidate_count": 16,
+    "matched_ground_truth_count": 16,
+    "missed_ground_truth_count": 0,
+    "true_positive_candidate_count": 16,
+    "false_positive_candidate_count": 0,
+    "recall": 1.0,
+    "candidate_precision": 1.0,
+    "exact_span_match_count": 16
+  },
+  "category_results": {
+    "会社名": {"ground_truth": 5, "candidates": 5, "missed": 0, "true_positive_candidates": 5, "false_positive_candidates": 0},
+    "氏名": {"ground_truth": 5, "candidates": 5, "missed": 0, "true_positive_candidates": 5, "false_positive_candidates": 0},
+    "住所": {"ground_truth": 1, "candidates": 1, "missed": 0, "true_positive_candidates": 1, "false_positive_candidates": 0},
+    "電話番号": {"ground_truth": 1, "candidates": 1, "missed": 0, "true_positive_candidates": 1, "false_positive_candidates": 0},
+    "メールアドレス": {"ground_truth": 3, "candidates": 3, "missed": 0, "true_positive_candidates": 3, "false_positive_candidates": 0},
+    "銀行名": {"ground_truth": 1, "candidates": 1, "missed": 0, "true_positive_candidates": 1, "false_positive_candidates": 0}
+  },
+  "limitations": [
+    "These results are from synthetic development data only.",
+    "They do not indicate validation, holdout, unknown Word, or production performance.",
+    "No real personal names, company names, addresses, or customer data are stored in this record."
+  ]
+}
