@@ -16,6 +16,15 @@ dependencies = [
 build = [
     "pyinstaller>=6.0",
 ]
+dev = [
+    "pytest>=8.0",
+]
 
 [tool.pyinstaller]
 name = "ExcelPrivacyCleaner"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "local_data: requires the private local test corpus (real sample PDFs/Excel files) that is not committed to git; excluded from default CI",
+]

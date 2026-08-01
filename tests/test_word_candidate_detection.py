@@ -304,5 +304,13 @@ def main() -> int:
     return 0
 
 
+def test_word_phase2_1_unit_rules() -> None:
+    run_phase2_1_unit_tests()
+
+
+def test_word_candidate_detection_pipeline() -> None:
+    assert main() == 0
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

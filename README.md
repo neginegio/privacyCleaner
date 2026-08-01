@@ -42,6 +42,23 @@ dist\hosoPrivacyCleaner\hosoPrivacyCleaner.exe
 - 処理後に一時コピーを削除
 - 変換履歴を画面上に表示
 
+## テスト
+
+自己完結型テスト(合成データのみで完結し、GitHub Actions でも実行されます):
+
+```cmd
+pip install -r requirements-dev.txt
+pytest tests -v
+```
+
+`tools/test_*.py` は実データ(git 管理外の実 PDF/Excel サンプルなど)や Windows の日本語フォント、GUI に依存するテストです。ローカルにサンプルデータを用意した上で個別に実行してください:
+
+```cmd
+python tools/test_analysis_mode.py
+```
+
+これらは `tests/test_local_data.py` から `RUN_LOCAL_DATA_TESTS=1` を立てた場合のみ pytest からも実行できます(サンプルデータが無ければ自動的に SKIP されます)。CI は `pytest tests -m "not local_data"` を実行し、これらは対象外です。
+
 ## 注意
 
 - Python 3.10 以上が必要です。exe 化後は利用者 PC に Python は不要です。
