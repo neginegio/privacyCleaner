@@ -1,0 +1,25 @@
+{
+  "dataset_version": "word_dataset_split_v1",
+  "development": {
+    "synthetic_phase2_docx": {
+      "generator": "tools/test_word_candidate_detection.py:create_development_docx",
+      "note": "Generated synthetic development data only. Regenerated during tests."
+    }
+  },
+  "validation": {
+    "synthetic_phase2_docx": {
+      "path": "docs\\evaluation_baselines\\word_phase2_validation\\Word匿名化検出_Phase2_ValidationSynthetic.docx",
+      "sha256": "028972970592182d8c8ccc1a48e0e591998c5ac1f6b088ad090f8efdc95fb1a8"
+    },
+    "ground_truth_csv": {
+      "path": "docs\\evaluation_baselines\\word_phase2_validation\\Word匿名化検出_Phase2_ValidationGroundTruth.csv",
+      "sha256": "a036fd2711f0fd25c4b8d352db57566720ca14a6c17688952d697904f0b91810"
+    },
+    "note": "Validation ground truth is fixed before initial candidate generation. Do not use for rule tuning until the initial result is recorded."
+  },
+  "holdout": {
+    "reserved": true,
+    "note": "Do not inspect or use holdout data during implementation."
+  },
+  "leakage_guard": "Candidate generation code must not read this file."
+}
