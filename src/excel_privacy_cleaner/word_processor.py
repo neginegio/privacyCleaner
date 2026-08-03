@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from docx import Document
 
+from .excel_processor import AliasBook, ProcessingOptions, replacement_for
 from .presidio_japanese import JapanesePresidioDetector, entity_label
 
 
@@ -172,6 +175,53 @@ class WordCandidate:
     property_name: str | None = None
 
 
+@dataclass
+class WordReplacementDecision:
+    candidate: WordCandidate
+    enabled: bool = True
+    replacement: str = ""
+
+
+@dataclass(frozen=True)
+class WordConversionResult:
+    output_path: Path
+    warnings: tuple[str, ...]
+    converted_run_count: int
+    converted_property_count: int
+    skipped_hyperlink_target_count: int
+
+
+WORD_CATEGORY_ALIAS_KIND = {
+    "会社名": "company",
+    "氏名": "name",
+    "住所": "address",
+    "電話番号": "phone",
+    "メールアドレス": "email",
+}
+
+
+def default_replacement_for_candidate(candidate: WordCandidate, alias_book: AliasBook, options: ProcessingOptions) -> str:
+    if candidate.category == "銀行名":
+        return alias_book.get("financial_institution", candidate.text)
+    kind = WORD_CATEGORY_ALIAS_KIND.get(candidate.category)
+    if kind:
+        return replacement_for(kind, candidate.text, alias_book, options)
+    return alias_book.get("text", candidate.text)
+
+
+def build_default_decisions(
+    candidates: tuple[WordCandidate, ...],
+    alias_book: AliasBook,
+    options: ProcessingOptions,
+) -> list[WordReplacementDecision]:
+    decisions: list[WordReplacementDecision] = []
+    for candidate in candidates:
+        enabled = candidate.source != "hyperlink_target"
+        replacement = default_replacement_for_candidate(candidate, alias_book, options)
+        decisions.append(WordReplacementDecision(candidate=candidate, enabled=enabled, replacement=replacement))
+    return decisions
+
+
 def extract_word_structure(path: Path) -> WordStructureInventory:
     validate_docx_input(path)
     source_sha256 = _file_sha256(path)
@@ -212,14 +262,7 @@ def extract_word_structure(path: Path) -> WordStructureInventory:
         )
 
     for section_index, section in enumerate(document.sections):
-        for header_footer_type, story_type, story in (
-            ("default", "header", section.header),
-            ("first_page", "header", section.first_page_header),
-            ("even_page", "header", section.even_page_header),
-            ("default", "footer", section.footer),
-            ("first_page", "footer", section.first_page_footer),
-            ("even_page", "footer", section.even_page_footer),
-        ):
+        for header_footer_type, story_type, story in _section_stories(section):
             linked = bool(story.is_linked_to_previous)
             part_name = _part_name(story)
             story_prefix = f"{story_type}[{section_index}]/{header_footer_type}"
@@ -265,6 +308,34 @@ def extract_word_structure(path: Path) -> WordStructureInventory:
     )
 
 
+def _section_stories(section: Any) -> tuple[tuple[str, str, Any], ...]:
+    return (
+        ("default", "header", section.header),
+        ("first_page", "header", section.first_page_header),
+        ("even_page", "header", section.even_page_header),
+        ("default", "footer", section.footer),
+        ("first_page", "footer", section.first_page_footer),
+        ("even_page", "footer", section.even_page_footer),
+    )
+
+
+def _iter_table_paragraph_objects(table: Any) -> Iterator[Any]:
+    for row in table.rows:
+        for cell in row.cells:
+            yield from cell.paragraphs
+
+
+def _iter_paragraph_objects(document: Any) -> Iterator[Any]:
+    yield from document.paragraphs
+    for table in document.tables:
+        yield from _iter_table_paragraph_objects(table)
+    for section in document.sections:
+        for _header_footer_type, _story_type, story in _section_stories(section):
+            yield from story.paragraphs
+            for table in story.tables:
+                yield from _iter_table_paragraph_objects(table)
+
+
 def detect_word_candidates(path: Path) -> tuple[WordStructureInventory, tuple[WordCandidate, ...]]:
     inventory = extract_word_structure(path)
     return inventory, candidates_for_inventory(inventory)
@@ -291,6 +362,181 @@ def candidates_for_inventory(inventory: WordStructureInventory) -> tuple[WordCan
             _append_property_candidates(candidates, seen, inventory, property_name, value, detector)
 
     return tuple(candidates)
+
+
+class WordPrivacyProcessor:
+    def __init__(self) -> None:
+        self.detector = JapanesePresidioDetector()
+        self.alias_book = AliasBook()
+        self.options = ProcessingOptions()
+        self.inventory: WordStructureInventory | None = None
+        self.temp_dir: Path | None = None
+        self.temp_docx: Path | None = None
+
+    def cleanup(self) -> None:
+        if self.temp_dir and self.temp_dir.exists():
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+        self.temp_dir = None
+        self.temp_docx = None
+        self.inventory = None
+
+    def scan(self, docx_path: Path, options: ProcessingOptions | None = None) -> list[WordReplacementDecision]:
+        self.cleanup()
+        self.options = options or ProcessingOptions()
+        self.alias_book = AliasBook()
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="WordPrivacyCleaner_"))
+        self.temp_docx = self.temp_dir / docx_path.name
+        shutil.copy2(docx_path, self.temp_docx)
+        self.inventory = extract_word_structure(self.temp_docx)
+        candidates = candidates_for_inventory(self.inventory)
+        return build_default_decisions(candidates, self.alias_book, self.options)
+
+    def convert(
+        self,
+        source_path: Path,
+        decisions: list[WordReplacementDecision],
+        output_dir: Path | None = None,
+    ) -> WordConversionResult:
+        if not self.temp_docx or not self.temp_docx.exists() or self.inventory is None:
+            raise RuntimeError("先に検査を実行してください。")
+
+        warnings: list[str] = []
+        enabled_decisions = [decision for decision in decisions if decision.enabled]
+
+        blocked_hyperlink_targets = [
+            decision for decision in enabled_decisions if decision.candidate.source == "hyperlink_target"
+        ]
+        if blocked_hyperlink_targets:
+            preview = "、".join(decision.candidate.text for decision in blocked_hyperlink_targets[:8])
+            raise RuntimeError(
+                f"ハイパーリンクURLの置換は未対応です。対象候補 {len(blocked_hyperlink_targets)} 件を無効のままにしてください。"
+                f"対象例: {preview}"
+            )
+        skipped_hyperlink_target_count = sum(
+            1 for decision in decisions if decision.candidate.source == "hyperlink_target" and not decision.enabled
+        )
+        if skipped_hyperlink_target_count:
+            warnings.append(
+                f"ハイパーリンクURL候補 {skipped_hyperlink_target_count} 件は今回の匿名化対象外です(URL自体は元のまま残ります)。"
+            )
+
+        paragraph_by_location = {
+            _paragraph_location_id(paragraph): paragraph for paragraph in self.inventory.paragraphs
+        }
+        paragraph_decisions = [decision for decision in enabled_decisions if decision.candidate.source == "paragraph"]
+        for decision in paragraph_decisions:
+            candidate = decision.candidate
+            paragraph = paragraph_by_location.get(candidate.location_id)
+            if paragraph is None or paragraph.text[candidate.char_start : candidate.char_end] != candidate.text:
+                raise RuntimeError(
+                    f"構造が変化しました。再スキャンしてください。対象候補: {candidate.category} {candidate.text!r}"
+                )
+
+        decisions_by_location: dict[str, list[WordReplacementDecision]] = {}
+        for decision in paragraph_decisions:
+            decisions_by_location.setdefault(decision.candidate.location_id, []).append(decision)
+        for location_id, location_decisions in decisions_by_location.items():
+            ordered = sorted(location_decisions, key=lambda item: item.candidate.char_start)
+            for previous, current in zip(ordered, ordered[1:]):
+                if previous.candidate.char_end > current.candidate.char_start:
+                    raise RuntimeError(
+                        "検出候補の範囲が重複しています: "
+                        f"{previous.candidate.category} {previous.candidate.text!r} / "
+                        f"{current.candidate.category} {current.candidate.text!r}"
+                    )
+
+        property_decisions = [decision for decision in enabled_decisions if decision.candidate.source == "document_property"]
+        decisions_by_property: dict[str, list[WordReplacementDecision]] = {}
+        for decision in property_decisions:
+            property_name = decision.candidate.property_name or ""
+            decisions_by_property.setdefault(property_name, []).append(decision)
+        for property_name, property_decision_list in decisions_by_property.items():
+            ordered = sorted(property_decision_list, key=lambda item: item.candidate.char_start)
+            for previous, current in zip(ordered, ordered[1:]):
+                if previous.candidate.char_end > current.candidate.char_start:
+                    raise RuntimeError(
+                        f"文書プロパティ {property_name} の検出候補の範囲が重複しています。"
+                    )
+
+        document = Document(self.temp_docx)
+        live_paragraph_objects = list(_iter_paragraph_objects(document))
+        if len(live_paragraph_objects) != len(self.inventory.paragraphs):
+            raise RuntimeError("構造が変化しました。再スキャンしてください。")
+        live_paragraphs_by_location = {
+            _paragraph_location_id(paragraph_info): paragraph_object
+            for paragraph_info, paragraph_object in zip(self.inventory.paragraphs, live_paragraph_objects)
+        }
+
+        converted_run_count = 0
+        for location_id, location_decisions in decisions_by_location.items():
+            paragraph_object = live_paragraphs_by_location.get(location_id)
+            if paragraph_object is None:
+                continue
+            run_items = _paragraph_runs_with_offsets(paragraph_object)
+            converted_run_count += _apply_paragraph_decisions(run_items, location_decisions)
+
+        converted_property_count = 0
+        for property_name, property_decision_list in decisions_by_property.items():
+            current_value = getattr(document.core_properties, property_name, "") or ""
+            new_value = current_value
+            for start, end, replacement in sorted(
+                (
+                    (decision.candidate.char_start, decision.candidate.char_end, decision.replacement)
+                    for decision in property_decision_list
+                ),
+                key=lambda item: item[0],
+                reverse=True,
+            ):
+                new_value = new_value[:start] + replacement + new_value[end:]
+            setattr(document.core_properties, property_name, new_value)
+            converted_property_count += 1
+
+        output_path = _make_word_output_path(source_path, output_dir=output_dir, options=self.options)
+        document.save(output_path)
+
+        result = WordConversionResult(
+            output_path=output_path,
+            warnings=tuple(warnings),
+            converted_run_count=converted_run_count,
+            converted_property_count=converted_property_count,
+            skipped_hyperlink_target_count=skipped_hyperlink_target_count,
+        )
+        self.cleanup()
+        return result
+
+
+def _apply_paragraph_decisions(run_items: list[dict[str, Any]], decisions: list[WordReplacementDecision]) -> int:
+    edits_by_run: dict[int, list[tuple[int, int, str]]] = {}
+    for decision in decisions:
+        candidate = decision.candidate
+        for position, run_index in enumerate(candidate.affected_run_indices):
+            if run_index >= len(run_items):
+                continue
+            run_item = run_items[run_index]
+            local_start = max(candidate.char_start, run_item["char_start"]) - run_item["char_start"]
+            local_end = min(candidate.char_end, run_item["char_end"]) - run_item["char_start"]
+            slice_text = decision.replacement if position == 0 else ""
+            edits_by_run.setdefault(run_index, []).append((local_start, local_end, slice_text))
+
+    changed = 0
+    for run_index, edits in edits_by_run.items():
+        text = run_items[run_index]["text"]
+        for start, end, slice_text in sorted(edits, key=lambda item: item[0], reverse=True):
+            text = text[:start] + slice_text + text[end:]
+        run_items[run_index]["element"].text = text
+        changed += 1
+    return changed
+
+
+def _make_word_output_path(source_path: Path, output_dir: Path | None = None, options: ProcessingOptions | None = None) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    folder = output_dir if output_dir is not None else source_path.parent
+    folder.mkdir(parents=True, exist_ok=True)
+    mode_label = (options or ProcessingOptions()).mode_label
+    candidate = folder / f"{source_path.stem}_{mode_label}_匿名化_{timestamp}{WORD_SUPPORTED_EXTENSION}"
+    if not candidate.exists():
+        return candidate
+    return folder / f"{source_path.stem}_{mode_label}_匿名化_{timestamp}_{datetime.now().microsecond:06d}{WORD_SUPPORTED_EXTENSION}"
 
 
 def validate_docx_input(path: Path) -> None:
@@ -473,7 +719,7 @@ def _paragraph_runs_with_offsets(paragraph: Any) -> list[dict[str, Any]]:
         if tag == "r":
             text = _run_text(child)
             if text:
-                items.append({"text": text, "char_start": cursor, "char_end": cursor + len(text)})
+                items.append({"text": text, "char_start": cursor, "char_end": cursor + len(text), "element": child})
                 cursor += len(text)
         elif tag == "hyperlink":
             rel_id = child.get(f"{{{R_NS}}}id")
@@ -490,6 +736,7 @@ def _paragraph_runs_with_offsets(paragraph: Any) -> list[dict[str, Any]]:
                             "char_end": cursor + len(text),
                             "hyperlink_url": url,
                             "hyperlink_rel_id": rel_id,
+                            "element": run,
                         }
                     )
                     cursor += len(text)
