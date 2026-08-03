@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import zipfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from excel_privacy_cleaner.word_processor import (  # noqa: E402
     WordPrivacyProcessor,
     WordReplacementDecision,
     build_default_decisions,
+    candidate_requires_review,
     default_replacement_for_candidate,
     extract_word_structure,
 )
@@ -87,8 +89,48 @@ def create_replacement_fixture(path: Path) -> None:
     document.save(path)
 
 
+def create_low_confidence_name_fixture(path: Path) -> None:
+    document = Document()
+    document.add_paragraph("佐藤 花子")
+    document.save(path)
+
+
+def create_high_confidence_only_fixture(path: Path) -> None:
+    document = Document()
+    document.add_paragraph("連絡先電話は090-1111-2222です。")
+    document.save(path)
+
+
+def inject_unsupported_comments_part(path: Path) -> None:
+    tmp_path = path.with_name(path.name + ".tmp")
+    with zipfile.ZipFile(path) as source_archive, zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as target_archive:
+        for info in source_archive.infolist():
+            target_archive.writestr(info, source_archive.read(info.filename))
+        target_archive.writestr(
+            "word/comments.xml",
+            (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                '<w:comment w:id="0"><w:p><w:r><w:t>コメント内文字</w:t></w:r></w:p></w:comment>'
+                "</w:comments>"
+            ).encode("utf-8"),
+        )
+    tmp_path.replace(path)
+
+
 def _decisions_by_text(decisions: list[WordReplacementDecision], text: str) -> list[WordReplacementDecision]:
     return [decision for decision in decisions if decision.candidate.text == text]
+
+
+def _enable_review_required(decisions: list[WordReplacementDecision]) -> list[WordReplacementDecision]:
+    # The fixture intentionally includes low-confidence (<0.75) name candidates
+    # (table cell, footer, author property) that default to disabled under the
+    # review-required guard. Tests that aren't about that guard itself approve
+    # them explicitly here, mirroring a reviewer confirming a real candidate.
+    for decision in decisions:
+        if decision.candidate.source != "hyperlink_target":
+            decision.enabled = True
+    return decisions
 
 
 def test_single_run_replacement_preserves_sibling_run_formatting() -> None:
@@ -103,6 +145,7 @@ def test_single_run_replacement_preserves_sibling_run_formatting() -> None:
 
         processor = WordPrivacyProcessor()
         decisions = processor.scan(source)
+        _enable_review_required(decisions)
         result = processor.convert(source, decisions, output_dir=tmp)
 
         assert_true("090-1111-2222" not in Document(result.output_path).paragraphs[0].runs[0].text, "Phone run should be replaced")
@@ -121,6 +164,7 @@ def test_multi_run_candidate_replaces_first_run_and_empties_rest() -> None:
 
         processor = WordPrivacyProcessor()
         decisions = processor.scan(source)
+        _enable_review_required(decisions)
         result = processor.convert(source, decisions, output_dir=tmp)
 
         output_paragraphs = Document(result.output_path).paragraphs
@@ -144,6 +188,7 @@ def test_two_non_overlapping_candidates_in_same_paragraph() -> None:
 
         processor = WordPrivacyProcessor()
         decisions = processor.scan(source)
+        _enable_review_required(decisions)
         company_decisions = [d for d in _decisions_by_text(decisions, "株式会社未来会議") if in_mixed_paragraph(d)]
         name_decisions = [d for d in _decisions_by_text(decisions, "山田 太郎") if in_mixed_paragraph(d)]
         assert_true(len(company_decisions) == 1 and len(name_decisions) == 1, "Both candidates should be detected once in this paragraph")
@@ -166,6 +211,7 @@ def test_table_cell_replacement_preserves_cell_formatting() -> None:
 
         processor = WordPrivacyProcessor()
         decisions = processor.scan(source)
+        _enable_review_required(decisions)
         result = processor.convert(source, decisions, output_dir=tmp)
 
         output_table = Document(result.output_path).tables[0]
@@ -184,6 +230,7 @@ def test_header_and_footer_replacement() -> None:
 
         processor = WordPrivacyProcessor()
         decisions = processor.scan(source)
+        _enable_review_required(decisions)
         result = processor.convert(source, decisions, output_dir=tmp)
 
         output_document = Document(result.output_path)
@@ -201,6 +248,7 @@ def test_document_property_replacement() -> None:
 
         processor = WordPrivacyProcessor()
         decisions = processor.scan(source)
+        _enable_review_required(decisions)
         result = processor.convert(source, decisions, output_dir=tmp)
 
         properties = Document(result.output_path).core_properties
@@ -217,6 +265,7 @@ def test_alias_reused_for_repeated_original_text() -> None:
 
         processor = WordPrivacyProcessor()
         decisions = processor.scan(source)
+        _enable_review_required(decisions)
         company_aliases = {decision.replacement for decision in _decisions_by_text(decisions, "株式会社未来会議")}
         assert_true(len(company_aliases) == 1, "Same original text must map to a single alias within one scan")
 
@@ -237,6 +286,7 @@ def test_bank_name_uses_financial_institution_alias_prefix() -> None:
 
         processor = WordPrivacyProcessor()
         decisions = processor.scan(source)
+        _enable_review_required(decisions)
         bank_decisions = _decisions_by_text(decisions, "みらい銀行")
         assert_true(len(bank_decisions) == 1, "Bank name should be detected once")
         assert_true(bank_decisions[0].replacement.startswith("金融機関"), "Bank alias should use the financial_institution prefix")
@@ -258,6 +308,7 @@ def test_hyperlink_target_candidates_are_disabled_by_default_and_guarded() -> No
         assert_true(bool(hyperlink_decisions), "Hyperlink URL should produce at least one candidate")
         assert_true(all(not d.enabled for d in hyperlink_decisions), "Hyperlink URL candidates must default to disabled")
 
+        _enable_review_required(decisions)
         result = processor.convert(source, decisions, output_dir=tmp)
         output_inventory = extract_word_structure(result.output_path)
         assert_true(
@@ -267,6 +318,7 @@ def test_hyperlink_target_candidates_are_disabled_by_default_and_guarded() -> No
 
         processor_2 = WordPrivacyProcessor()
         decisions_2 = processor_2.scan(source)
+        _enable_review_required(decisions_2)
         for decision in decisions_2:
             if decision.candidate.source == "hyperlink_target":
                 decision.enabled = True
@@ -287,6 +339,7 @@ def test_overlap_guard_rejects_overlapping_ranges() -> None:
 
         processor = WordPrivacyProcessor()
         decisions = processor.scan(source)
+        _enable_review_required(decisions)
         company_decision = _decisions_by_text(decisions, "株式会社未来会議")[0]
         candidate = company_decision.candidate
         overlapping_candidate = replace(
@@ -316,6 +369,7 @@ def test_integrity_guard_rejects_stale_candidate_text() -> None:
 
         processor = WordPrivacyProcessor()
         decisions = processor.scan(source)
+        _enable_review_required(decisions)
         company_decision = _decisions_by_text(decisions, "株式会社未来会議")[0]
         stale_candidate = replace(company_decision.candidate, text="ズレた文字列")
         stale_decisions = [d for d in decisions if d is not company_decision]
@@ -337,6 +391,7 @@ def test_end_to_end_scan_and_convert_leaves_no_marker_strings() -> None:
 
         processor = WordPrivacyProcessor()
         decisions = processor.scan(source)
+        _enable_review_required(decisions)
         result = processor.convert(source, decisions, output_dir=tmp)
 
         # Surface-level check only: this does not inspect internal XML parts
@@ -373,3 +428,96 @@ def test_default_replacement_for_candidate_uses_alias_book_directly() -> None:
 
     decisions = build_default_decisions((candidate,), alias_book, options)
     assert_true(decisions[0].replacement == replacement, "build_default_decisions should reuse the same alias")
+
+
+def test_low_confidence_candidate_blocks_by_default() -> None:
+    with tempfile.TemporaryDirectory(prefix="word_replacement_") as tmpdir:
+        tmp = Path(tmpdir)
+        source = tmp / "fixture.docx"
+        create_low_confidence_name_fixture(source)
+
+        processor = WordPrivacyProcessor()
+        decisions = processor.scan(source)
+        assert_true(len(decisions) == 1, "Fixture should yield exactly one candidate")
+        name_decision = decisions[0]
+        assert_true(name_decision.candidate.confidence < 0.75, "Unlabeled two-part name should be a low-confidence match")
+        assert_true(not name_decision.enabled, "Low-confidence candidate must default to disabled")
+
+        raised = False
+        try:
+            processor.convert(source, decisions, output_dir=tmp)
+        except RuntimeError as exc:
+            raised = True
+            assert_true("未確認候補" in str(exc), "Error should identify the block as an unreviewed candidate")
+        assert_true(raised, "Leaving a low-confidence candidate disabled must block conversion")
+
+
+def test_review_required_candidate_allows_conversion_when_enabled() -> None:
+    with tempfile.TemporaryDirectory(prefix="word_replacement_") as tmpdir:
+        tmp = Path(tmpdir)
+        source = tmp / "fixture.docx"
+        create_low_confidence_name_fixture(source)
+
+        processor = WordPrivacyProcessor()
+        decisions = processor.scan(source)
+        decisions[0].enabled = True
+        result = processor.convert(source, decisions, output_dir=tmp)
+
+        output_text = Document(result.output_path).paragraphs[0].text
+        assert_true("佐藤" not in output_text and "花子" not in output_text, "Approved candidate should be replaced")
+
+
+def test_unsupported_feature_blocks_external_mode_but_warns_in_analysis_mode() -> None:
+    with tempfile.TemporaryDirectory(prefix="word_replacement_") as tmpdir:
+        tmp = Path(tmpdir)
+        source = tmp / "fixture.docx"
+        create_high_confidence_only_fixture(source)
+        inject_unsupported_comments_part(source)
+
+        external_processor = WordPrivacyProcessor()
+        external_decisions = external_processor.scan(source, options=ProcessingOptions(mode="external"))
+        raised = False
+        try:
+            external_processor.convert(source, external_decisions, output_dir=tmp)
+        except RuntimeError as exc:
+            raised = True
+            assert_true("未対応領域" in str(exc), "Error should mention the unsupported region")
+        assert_true(raised, "External-share mode must block output when unsupported features are present")
+
+        analysis_processor = WordPrivacyProcessor()
+        analysis_decisions = analysis_processor.scan(source)
+        result = analysis_processor.convert(source, analysis_decisions, output_dir=tmp)
+        assert_true(
+            any("未対応領域内の匿名化は保証しない" in warning for warning in result.warnings),
+            "Analysis mode must warn with the exact required phrase instead of blocking",
+        )
+        assert_true("090-1111-2222" not in Document(result.output_path).paragraphs[0].text, "High-confidence candidate should still convert")
+
+
+def test_candidate_requires_review_threshold() -> None:
+    high_confidence = replace(
+        WordCandidate(
+            candidate_id="a",
+            category="氏名",
+            story_type="body",
+            section_index=None,
+            container_type="paragraph",
+            paragraph_index=0,
+            table_index=None,
+            row_index=None,
+            cell_index=None,
+            location_id="loc",
+            char_start=0,
+            char_end=2,
+            text="x",
+            detection_rule="test",
+            confidence=0.75,
+            source="paragraph",
+        )
+    )
+    low_confidence = replace(high_confidence, candidate_id="b", confidence=0.74)
+    weak_hyperlink = replace(high_confidence, candidate_id="c", confidence=0.1, source="hyperlink_target")
+
+    assert_true(not candidate_requires_review(high_confidence), "Confidence at the threshold should not require review")
+    assert_true(candidate_requires_review(low_confidence), "Confidence just below the threshold should require review")
+    assert_true(not candidate_requires_review(weak_hyperlink), "hyperlink_target must never be flagged by this guard")
