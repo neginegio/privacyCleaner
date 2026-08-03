@@ -528,6 +528,19 @@ class WordPrivacyProcessor:
         output_path = _make_word_output_path(source_path, output_dir=output_dir, options=self.options)
         document.save(output_path)
 
+        residual = _find_residual_text(output_path, paragraph_decisions + property_decisions)
+        if residual:
+            detail = _format_residual_detail(residual)
+            if not self.options.is_analysis:
+                output_path.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"内部XML残存検査で匿名化対象の原文が検出されたため外部共有用の出力を停止しました。残存箇所: {detail}"
+                )
+            warnings.append(
+                f"内部XML残存検査で匿名化対象の原文が検出されました(残存箇所: {detail})。"
+                "本文以外の内部XMLに原文が残っている可能性があるため、外部共有する場合は内容を必ず確認してください。"
+            )
+
         review_required_count = sum(
             1
             for decision in decisions
@@ -566,6 +579,47 @@ def _apply_paragraph_decisions(run_items: list[dict[str, Any]], decisions: list[
         run_items[run_index]["element"].text = text
         changed += 1
     return changed
+
+
+def _find_residual_text(
+    output_path: Path,
+    checked_decisions: list[WordReplacementDecision],
+) -> dict[str, set[str]]:
+    """Scan every .xml/.rels part of the saved output package for leftover
+    original text from checked_decisions. Callers must pre-filter to
+    paragraph/document_property decisions only -- hyperlink_target candidates
+    must never be passed in, since their original text (inside a URL) is
+    deliberately left unconverted by design and is not a residual leak.
+    """
+    residual: dict[str, set[str]] = {}
+    texts_by_category: dict[str, set[str]] = {}
+    for decision in checked_decisions:
+        text = decision.candidate.text
+        if text:
+            texts_by_category.setdefault(decision.candidate.category, set()).add(text)
+    if not texts_by_category:
+        return residual
+
+    with zipfile.ZipFile(output_path) as archive:
+        for name in archive.namelist():
+            if not name.endswith((".xml", ".rels")):
+                continue
+            content = archive.read(name).decode("utf-8", errors="ignore")
+            found = {
+                category
+                for category, texts in texts_by_category.items()
+                if any(text in content for text in texts)
+            }
+            if found:
+                residual[name] = found
+    return residual
+
+
+def _format_residual_detail(residual: dict[str, set[str]]) -> str:
+    return "、".join(
+        f"{part_name}: {', '.join(sorted(categories))}"
+        for part_name, categories in sorted(residual.items())
+    )
 
 
 def _make_word_output_path(source_path: Path, output_dir: Path | None = None, options: ProcessingOptions | None = None) -> Path:

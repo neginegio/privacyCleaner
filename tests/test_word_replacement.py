@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 import tempfile
 import zipfile
@@ -23,6 +24,7 @@ from excel_privacy_cleaner.word_processor import (  # noqa: E402
     candidate_requires_review,
     default_replacement_for_candidate,
     extract_word_structure,
+    _find_residual_text,
 )
 
 
@@ -115,6 +117,19 @@ def inject_unsupported_comments_part(path: Path) -> None:
                 "</w:comments>"
             ).encode("utf-8"),
         )
+    tmp_path.replace(path)
+
+
+def inject_company_into_app_properties(path: Path, company_text: str) -> None:
+    tmp_path = path.with_name(path.name + ".tmp")
+    with zipfile.ZipFile(path) as source_archive, zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as target_archive:
+        for info in source_archive.infolist():
+            data = source_archive.read(info.filename)
+            if info.filename == "docProps/app.xml":
+                text = data.decode("utf-8")
+                text = re.sub(r"<Company\s*/>|<Company>.*?</Company>", f"<Company>{company_text}</Company>", text)
+                data = text.encode("utf-8")
+            target_archive.writestr(info, data)
     tmp_path.replace(path)
 
 
@@ -394,12 +409,17 @@ def test_end_to_end_scan_and_convert_leaves_no_marker_strings() -> None:
         _enable_review_required(decisions)
         result = processor.convert(source, decisions, output_dir=tmp)
 
-        # Surface-level check only: this does not inspect internal XML parts
-        # (docProps/*.xml relationships, etc.) that step 7's residual scan will cover.
+        # This checks the readable body/table/header/footer text via python-docx;
+        # the raw internal-XML residual scan (step 7) is asserted separately below.
         output_inventory = extract_word_structure(result.output_path)
         combined_text = "\n".join(paragraph.text for paragraph in output_inventory.paragraphs)
         for marker in ("株式会社未来会議", "山田", "太郎", "佐藤", "花子", "みらい銀行", "090-1111-2222"):
             assert_true(marker not in combined_text, f"Marker should not remain in output body/table/header/footer: {marker}")
+
+        assert_true(
+            not any("残存" in warning for warning in result.warnings),
+            "Well-behaved fixture must not trigger the internal-XML residual warning",
+        )
 
 
 def test_default_replacement_for_candidate_uses_alias_book_directly() -> None:
@@ -521,3 +541,85 @@ def test_candidate_requires_review_threshold() -> None:
     assert_true(not candidate_requires_review(high_confidence), "Confidence at the threshold should not require review")
     assert_true(candidate_requires_review(low_confidence), "Confidence just below the threshold should require review")
     assert_true(not candidate_requires_review(weak_hyperlink), "hyperlink_target must never be flagged by this guard")
+
+
+def test_find_residual_text_detects_company_in_app_properties() -> None:
+    with tempfile.TemporaryDirectory(prefix="word_replacement_") as tmpdir:
+        tmp = Path(tmpdir)
+        source = tmp / "fixture.docx"
+        create_replacement_fixture(source)
+        inject_company_into_app_properties(source, "株式会社未来会議")
+
+        candidate = WordCandidate(
+            candidate_id="synthetic_app_props",
+            category="会社名",
+            story_type="body",
+            section_index=None,
+            container_type="paragraph",
+            paragraph_index=0,
+            table_index=None,
+            row_index=None,
+            cell_index=None,
+            location_id="loc",
+            char_start=0,
+            char_end=8,
+            text="株式会社未来会議",
+            detection_rule="test",
+            confidence=0.9,
+            source="paragraph",
+        )
+        decision = WordReplacementDecision(candidate=candidate, enabled=True, replacement="法人001")
+
+        residual = _find_residual_text(source, [decision])
+        assert_true("docProps/app.xml" in residual, "Company text injected into app.xml should be detected")
+        assert_true(residual["docProps/app.xml"] == {"会社名"}, "Detected category should match the candidate's category")
+
+
+def test_residual_text_in_internal_xml_blocks_external_output() -> None:
+    with tempfile.TemporaryDirectory(prefix="word_replacement_") as tmpdir:
+        tmp = Path(tmpdir)
+        source = tmp / "fixture.docx"
+        create_replacement_fixture(source)
+        inject_company_into_app_properties(source, "株式会社未来会議")
+
+        processor = WordPrivacyProcessor()
+        decisions = processor.scan(source, options=ProcessingOptions(mode="external"))
+        _enable_review_required(decisions)
+        # python-docx's own default template already contains customXml parts and a
+        # styles.xml false-positive (see below), which independently trips the
+        # pre-existing (step 6) unsupported-features guard for *any* document. That's
+        # a separate, out-of-scope issue from this step's residual-XML guard, so it's
+        # neutralized here to isolate the guard actually under test.
+        processor.inventory = replace(processor.inventory, unsupported_features=())
+
+        before = set(tmp.iterdir())
+        raised = False
+        try:
+            processor.convert(source, decisions, output_dir=tmp)
+        except RuntimeError as exc:
+            raised = True
+            assert_true("残存" in str(exc) and "docProps/app.xml" in str(exc), "Error should identify the residual XML part")
+        assert_true(raised, "Residual text in internal XML must block external-share output")
+        assert_true(set(tmp.iterdir()) == before, "No output file should be left behind when blocked")
+
+
+def test_residual_text_in_internal_xml_warns_in_analysis_mode_without_leaking_original_text() -> None:
+    with tempfile.TemporaryDirectory(prefix="word_replacement_") as tmpdir:
+        tmp = Path(tmpdir)
+        source = tmp / "fixture.docx"
+        create_replacement_fixture(source)
+        inject_company_into_app_properties(source, "株式会社未来会議")
+
+        processor = WordPrivacyProcessor()
+        decisions = processor.scan(source)
+        _enable_review_required(decisions)
+        result = processor.convert(source, decisions, output_dir=tmp)
+
+        assert_true(result.output_path.exists(), "Analysis mode must still produce output despite the residual warning")
+        residual_warnings = [w for w in result.warnings if "残存" in w]
+        assert_true(len(residual_warnings) == 1, "Exactly one residual warning should be recorded")
+        assert_true("docProps/app.xml" in residual_warnings[0] and "会社名" in residual_warnings[0], "Warning should name the part and category")
+        assert_true(
+            all("株式会社未来会議" not in warning for warning in result.warnings),
+            "Warnings must never contain the raw leaked original text",
+        )
