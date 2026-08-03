@@ -26,6 +26,7 @@ WORD_CANDIDATE_CATEGORIES = {"会社名", "氏名", "住所", "電話番号", "�
 COMPANY_DESIGNATORS = ("株式会社", "有限会社", "合同会社", "医療法人", "学校法人", "社会福祉法人")
 COMPANY_SUFFIX_DESIGNATORS = ("株式会社", "有限会社", "合同会社")
 WORD_NAME_CHARS = r"一-龯々〆ヵヶぁ-んァ-ヶーA-Za-z0-9"
+WORD_REVIEW_CONFIDENCE_THRESHOLD = 0.75
 
 
 class UnsupportedWordDocumentError(RuntimeError):
@@ -189,6 +190,7 @@ class WordConversionResult:
     converted_run_count: int
     converted_property_count: int
     skipped_hyperlink_target_count: int
+    review_required_count: int
 
 
 WORD_CATEGORY_ALIAS_KIND = {
@@ -209,6 +211,12 @@ def default_replacement_for_candidate(candidate: WordCandidate, alias_book: Alia
     return alias_book.get("text", candidate.text)
 
 
+def candidate_requires_review(candidate: WordCandidate) -> bool:
+    if candidate.source == "hyperlink_target":
+        return False
+    return candidate.confidence < WORD_REVIEW_CONFIDENCE_THRESHOLD
+
+
 def build_default_decisions(
     candidates: tuple[WordCandidate, ...],
     alias_book: AliasBook,
@@ -216,7 +224,7 @@ def build_default_decisions(
 ) -> list[WordReplacementDecision]:
     decisions: list[WordReplacementDecision] = []
     for candidate in candidates:
-        enabled = candidate.source != "hyperlink_target"
+        enabled = candidate.source != "hyperlink_target" and not candidate_requires_review(candidate)
         replacement = default_replacement_for_candidate(candidate, alias_book, options)
         decisions.append(WordReplacementDecision(candidate=candidate, enabled=enabled, replacement=replacement))
     return decisions
@@ -420,6 +428,32 @@ class WordPrivacyProcessor:
                 f"ハイパーリンクURL候補 {skipped_hyperlink_target_count} 件は今回の匿名化対象外です(URL自体は元のまま残ります)。"
             )
 
+        review_required = [
+            decision
+            for decision in decisions
+            if not decision.enabled
+            and decision.candidate.source != "hyperlink_target"
+            and candidate_requires_review(decision.candidate)
+        ]
+        if review_required:
+            preview = "、".join(f"{decision.candidate.category}:{decision.candidate.text}" for decision in review_required[:8])
+            raise RuntimeError(
+                f"未確認候補が {len(review_required)} 件あります。信頼度の低い検出のため内容を確認し、"
+                f"問題なければ候補を有効にするか、誤りであれば手動修正のうえ再実行してください。対象例: {preview}"
+            )
+
+        if self.inventory.unsupported_features:
+            feature_counts: dict[str, int] = {}
+            for feature in self.inventory.unsupported_features:
+                feature_counts[feature.feature_type] = feature_counts.get(feature.feature_type, 0) + feature.count
+            detail = "、".join(f"{feature_type}: {count}件" for feature_type, count in sorted(feature_counts.items()))
+            if not self.options.is_analysis:
+                raise RuntimeError(f"未対応領域が検出されたため外部共有用の出力を停止しました。未対応領域: {detail}")
+            warnings.append(
+                f"未対応領域が検出されました(未対応領域: {detail})。未対応領域内の匿名化は保証しない。"
+                "分析継続用の範囲で利用し、外部共有する場合は内容を必ず確認してください。"
+            )
+
         paragraph_by_location = {
             _paragraph_location_id(paragraph): paragraph for paragraph in self.inventory.paragraphs
         }
@@ -494,12 +528,18 @@ class WordPrivacyProcessor:
         output_path = _make_word_output_path(source_path, output_dir=output_dir, options=self.options)
         document.save(output_path)
 
+        review_required_count = sum(
+            1
+            for decision in decisions
+            if decision.candidate.source != "hyperlink_target" and candidate_requires_review(decision.candidate)
+        )
         result = WordConversionResult(
             output_path=output_path,
             warnings=tuple(warnings),
             converted_run_count=converted_run_count,
             converted_property_count=converted_property_count,
             skipped_hyperlink_target_count=skipped_hyperlink_target_count,
+            review_required_count=review_required_count,
         )
         self.cleanup()
         return result
