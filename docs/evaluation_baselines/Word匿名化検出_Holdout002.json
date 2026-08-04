@@ -1,12 +1,12 @@
 {
   "baseline_name": "Word candidate detection Holdout002",
   "holdout_id": "Holdout002",
-  "evaluated_at_utc": "2026-08-04T13:04:01.499954+00:00",
-  "phase2_1_frozen_commit": "ca7b01e+ginza_ner",
+  "evaluated_at_utc": "2026-08-04T21:35:59.740963+00:00",
+  "phase2_1_frozen_commit": "ca7b01e+ginza_ner+label_filters",
   "word_sha256": "074ad48cb816f6e93f506fbd3c8b0e776320954aa439bbd35633c4f0d5311b14",
-  "candidate_sha256": "56aa29a75539ec674cf3982d2f8323a205a20f3c3352884e5a1fc4680c24fd16",
+  "candidate_sha256": "797e8c10c1b15706d2c1bfc462986bdf2e35c3ae74bebdcdfbf8d700a0184630",
   "ground_truth_sha256": "689f2e30128857d2e373c616f5c0505cc382431654f0ed220f1bc902cb1630d4",
-  "candidate_count_fixed_before_evaluation": 23,
+  "candidate_count_fixed_before_evaluation": 17,
   "ground_truth_count_completed_before_evaluation": 10,
   "formal_scope": {
     "included_story_types": [
@@ -30,13 +30,13 @@
   },
   "metrics": {
     "ground_truth_count": 9,
-    "candidate_count": 23,
+    "candidate_count": 17,
     "matched_ground_truth_count": 5,
     "missed_ground_truth_count": 4,
     "true_positive_candidate_count": 5,
-    "false_positive_candidate_count": 18,
+    "false_positive_candidate_count": 12,
     "recall": 0.556,
-    "candidate_precision": 0.217,
+    "candidate_precision": 0.294,
     "exact_span_match_count": 5
   },
   "category_results": {
@@ -50,11 +50,11 @@
     },
     "会社名": {
       "ground_truth_count": 1,
-      "candidate_count": 7,
+      "candidate_count": 8,
       "matched": 0,
       "missed": 1,
       "true_positive_candidate": 0,
-      "false_positive_candidate": 7
+      "false_positive_candidate": 8
     },
     "住所": {
       "ground_truth_count": 1,
@@ -66,11 +66,11 @@
     },
     "氏名": {
       "ground_truth_count": 3,
-      "candidate_count": 12,
+      "candidate_count": 5,
       "matched": 2,
       "missed": 1,
       "true_positive_candidate": 2,
-      "false_positive_candidate": 10
+      "false_positive_candidate": 3
     },
     "銀行名": {
       "ground_truth_count": 1,
@@ -95,7 +95,7 @@
   },
   "false_positive_cause_counts": {
     "span過大": 3,
-    "一般語誤検出": 15
+    "一般語誤検出": 9
   },
   "metadata_ground_truth_count": 1,
   "unsupported_handling": "Unsupported regions are recorded as a separate safety issue and are not included in the Phase 2.1 formal recall denominator.",
@@ -111,7 +111,7 @@
     "1 of 4 missed ground truths had no generated candidate, so the drop is not explained only by strict exact-span matching."
   ],
   "privacy_note": "This public record intentionally excludes original text, candidate text, ground truth text, and detailed spans containing real information.",
-  "private_error_details_sha256": "e70c46bf6696d33fc2a6ed5ec018dd88dcbf6d932e04c54e3a875edfc82e0385",
+  "private_error_details_sha256": "d9c3604d32f642836d830a01b75bdc79e03ecf62ed2815739de8a1ca2085ce78",
   "conversion_residual_check_performed": true,
   "conversion_residual_verdict": "pass",
   "conversion_residual_blocked_guard": "",

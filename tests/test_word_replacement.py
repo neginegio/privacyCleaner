@@ -490,6 +490,29 @@ def test_low_confidence_candidate_blocks_by_default() -> None:
         assert_true(raised, "Leaving a low-confidence candidate disabled must block conversion")
 
 
+def test_word_japanese_full_name_space_skips_form_labels_and_article_headers() -> None:
+    with tempfile.TemporaryDirectory(prefix="word_replacement_") as tmpdir:
+        tmp = Path(tmpdir)
+        source = tmp / "fixture.docx"
+        document = Document()
+        # Common form-label padding: a 2-character word split by repeated
+        # full-width spaces, immediately followed by a colon.
+        document.add_paragraph("氏　　　　　名：　　松下晴彦")
+        document.add_paragraph("住　　　所：〒000-0000 東京都")
+        # Article header: "第１条" loses its leading "第１" to the kanji-only
+        # regex, leaving a bare "条" paired with the article title.
+        document.add_paragraph("第１条　委託業務の範囲")
+        document.save(source)
+
+        processor = WordPrivacyProcessor()
+        decisions = processor.scan(source)
+        name_texts = {d.candidate.text for d in decisions if d.candidate.detection_rule == "word_japanese_full_name_space"}
+
+        assert_true("氏　　　　　名" not in name_texts, "Label padded for alignment before a colon must not be treated as a name")
+        assert_true("住　　　所" not in name_texts, "Same for 住所")
+        assert_true("条　委託業務" not in name_texts, "Article-number fragment must not be treated as a name")
+
+
 def test_ginza_ner_catches_bare_company_name_pattern_rules_miss() -> None:
     with tempfile.TemporaryDirectory(prefix="word_replacement_") as tmpdir:
         tmp = Path(tmpdir)
