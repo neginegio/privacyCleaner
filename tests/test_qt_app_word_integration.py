@@ -75,9 +75,9 @@ def test_word_scan_and_convert_via_gui(monkeypatch) -> None:
             assert_true(window.word_decisions[phone_row].enabled, "High-confidence phone candidate should default to enabled")
             assert_true(not window.word_decisions[name_row].enabled, "Low-confidence bare name candidate should default to disabled (review-required)")
 
-            # Column 3 (entity_type) must not be user-editable for Word rows,
+            # Column 4 (entity_type) must not be user-editable for Word rows,
             # since WordCandidate.category is immutable.
-            entity_item = window.table.item(name_row, 3)
+            entity_item = window.table.item(name_row, 4)
             assert_true(entity_item is not None and not (entity_item.flags() & Qt.ItemIsEditable), "Word rows must not allow editing the category column")
 
             # Simulate a reviewer approving the review-required candidate via the checkbox.
@@ -95,7 +95,7 @@ def test_word_scan_and_convert_via_gui(monkeypatch) -> None:
             app.processEvents()
 
 
-def test_word_exclude_button_resolves_overlap_and_review_required_deadlock(monkeypatch) -> None:
+def test_word_exclude_checkbox_resolves_overlap_and_review_required_deadlock(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     calls = _silence_message_boxes(monkeypatch)
 
@@ -127,12 +127,15 @@ def test_word_exclude_button_resolves_overlap_and_review_required_deadlock(monke
             assert_true(any(name == "critical" for name, _ in calls), "Leaving a review-required candidate merely unchecked must still block")
             calls.clear()
 
-            # Select the name row and mark it reviewed-and-excluded via the
-            # dedicated button -- this is the actual fix for the deadlock.
-            window.table.selectRow(name_row)
-            window.mark_selected_word_excluded()
+            # Check the "変換しない" (don't convert) checkbox for the name row --
+            # this is the actual fix for the deadlock.
+            window.table.item(name_row, 1).setCheckState(Qt.Checked)
             assert_true(window.word_decisions[name_row].excluded, "Decision should now be marked excluded")
             assert_true(not window.word_decisions[name_row].enabled, "Excluded decision must stay disabled")
+            assert_true(
+                window.table.item(name_row, 0).checkState() == Qt.Unchecked,
+                "Checking 変換しない must clear 変換する for the same row",
+            )
 
             result_holder: list[object] = []
             original_convert = window.processor.convert

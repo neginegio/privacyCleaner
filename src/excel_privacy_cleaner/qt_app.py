@@ -98,10 +98,9 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         self.scope_combo = QComboBox()
         self.pdf_redaction_combo = QComboBox()
         self.pdf_review_button = QPushButton("PDF候補確認")
-        self.word_exclude_button = QPushButton("要確認候補を除外確定(Word)")
         self.mode_note = QLabel("")
         self.history = QListWidget()
-        self.table = QTableWidget(0, 8)
+        self.table = QTableWidget(0, 9)
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -166,33 +165,33 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         export_csv_button.clicked.connect(self.export_findings_csv)
         clear_history_button.clicked.connect(self.clear_history)
         self.pdf_review_button.clicked.connect(self.open_pdf_review)
-        self.word_exclude_button.clicked.connect(self.mark_selected_word_excluded)
         action_row.addWidget(toggle_button)
         action_row.addWidget(all_button)
         action_row.addWidget(none_button)
         action_row.addWidget(self.pdf_review_button)
-        action_row.addWidget(self.word_exclude_button)
         action_row.addWidget(export_csv_button)
         action_row.addStretch(1)
         action_row.addWidget(clear_history_button)
         layout.addLayout(action_row)
 
-        headers = ["変換", "シート", "セル", "種類", "検査", "検出値", "変換後", "理由"]
+        headers = ["変換する", "変換しない", "シート", "セル", "種類", "検査", "検出値", "変換後", "理由"]
         self.table.setHorizontalHeaderLabels(headers)
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)
-        self.table.setColumnWidth(0, 54)
-        self.table.setColumnWidth(1, 110)
-        self.table.setColumnWidth(2, 64)
-        self.table.setColumnWidth(3, 74)
-        self.table.setColumnWidth(4, 90)
-        self.table.setColumnWidth(6, 130)
+        self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(8, QHeaderView.Stretch)
+        self.table.setColumnWidth(0, 64)
+        self.table.setColumnWidth(1, 64)
+        self.table.setColumnWidth(2, 110)
+        self.table.setColumnWidth(3, 64)
+        self.table.setColumnWidth(4, 74)
+        self.table.setColumnWidth(5, 90)
+        self.table.setColumnWidth(7, 130)
         self.table.itemDoubleClicked.connect(lambda _item: self.toggle_selected())
+        self.table.itemChanged.connect(self._on_table_item_changed)
         layout.addWidget(self.table, 1)
 
         history_label = QLabel("変換履歴")
@@ -455,17 +454,31 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         self.status_label.setText("PDF候補確認を反映しました。全ページが確認済みになるまで最終出力できません。")
 
     def refresh_table(self) -> None:
+        self.table.blockSignals(True)
         self.table.setRowCount(0)
+        is_word = self.is_word_source()
         # Word candidate categories are fixed by detection and can't be edited
         # after the fact (WordCandidate is immutable), unlike Excel/PDF's
-        # entity_type, so column 3 stays read-only for Word rows.
-        editable_offsets = {6} if self.is_word_source() else {3, 6}
+        # entity_type, so column 4 stays read-only for Word rows.
+        editable_offsets = {7} if is_word else {4, 7}
         for row, finding in enumerate(self.findings):
             self.table.insertRow(row)
             enabled = QTableWidgetItem()
             enabled.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             enabled.setCheckState(Qt.Checked if finding.enabled else Qt.Unchecked)
             self.table.setItem(row, 0, enabled)
+
+            # "変換しない" (reviewed-and-excluded) is a Word-only concept --
+            # Excel/PDF have no third state, so the checkbox stays absent
+            # (not just unchecked) for their rows.
+            excluded = QTableWidgetItem()
+            if is_word:
+                excluded.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                is_excluded = row < len(self.word_decisions) and self.word_decisions[row].excluded
+                excluded.setCheckState(Qt.Checked if is_excluded else Qt.Unchecked)
+            else:
+                excluded.setFlags(Qt.ItemIsSelectable)
+            self.table.setItem(row, 1, excluded)
 
             values = [
                 finding.sheet,
@@ -476,22 +489,58 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 finding.replacement,
                 finding.reason,
             ]
-            for offset, value in enumerate(values, start=1):
+            for offset, value in enumerate(values, start=2):
                 item = QTableWidgetItem(value)
                 if offset not in editable_offsets:
                     item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 self.table.setItem(row, offset, item)
+        self.table.blockSignals(False)
 
     def update_findings_from_table(self) -> None:
         for row, finding in enumerate(self.findings):
             enabled_item = self.table.item(row, 0)
-            entity_item = self.table.item(row, 3)
-            replacement_item = self.table.item(row, 6)
+            entity_item = self.table.item(row, 4)
+            replacement_item = self.table.item(row, 7)
             finding.enabled = enabled_item is not None and enabled_item.checkState() == Qt.Checked
             if entity_item is not None and entity_item.text().strip():
                 finding.entity_type = entity_item.text().strip()
             if replacement_item is not None and replacement_item.text().strip():
                 finding.replacement = replacement_item.text().strip()
+
+    def _on_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if item.column() not in (0, 1):
+            return
+        row = item.row()
+        other_column = 1 - item.column()
+        if item.checkState() == Qt.Checked:
+            other_item = self.table.item(row, other_column)
+            if other_item is not None and other_item.checkState() == Qt.Checked:
+                self.table.blockSignals(True)
+                other_item.setCheckState(Qt.Unchecked)
+                self.table.blockSignals(False)
+        if self.is_word_source():
+            self._refresh_word_row_status(row)
+
+    def _refresh_word_row_status(self, row: int) -> None:
+        if row >= len(self.word_decisions):
+            return
+        enabled_item = self.table.item(row, 0)
+        excluded_item = self.table.item(row, 1)
+        decision = self.word_decisions[row]
+        decision.enabled = enabled_item is not None and enabled_item.checkState() == Qt.Checked
+        decision.excluded = bool(
+            excluded_item is not None and excluded_item.checkState() == Qt.Checked and not decision.enabled
+        )
+        if row < len(self.findings):
+            self.findings[row].enabled = decision.enabled
+        self.table.blockSignals(True)
+        status_item = self.table.item(row, 5)
+        if status_item is not None:
+            status_item.setText(word_finding_status(decision))
+        reason_item = self.table.item(row, 8)
+        if reason_item is not None:
+            reason_item.setText(word_finding_reason(decision))
+        self.table.blockSignals(False)
 
     def toggle_selected(self) -> None:
         rows = sorted({index.row() for index in self.table.selectedIndexes()})
@@ -532,7 +581,6 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             self.mode_note.setText(self.mode_note.text() + "\n" + PDF_ASSISTANCE_NOTICE)
         self.pdf_redaction_combo.setEnabled(self.is_pdf_source())
         self.update_pdf_review_button()
-        self.word_exclude_button.setEnabled(self.is_word_source())
 
     def is_pdf_source(self) -> bool:
         return self.source_path is not None and self.source_path.suffix.lower() in PDF_EXTENSIONS
@@ -541,30 +589,14 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         return self.source_path is not None and self.source_path.suffix.lower() in WORD_EXTENSIONS
 
     def _sync_word_decisions_from_findings(self) -> None:
-        for decision, finding in zip(self.word_decisions, self.findings):
+        for row, (decision, finding) in enumerate(zip(self.word_decisions, self.findings)):
             decision.enabled = finding.enabled
-            if finding.enabled:
-                decision.excluded = False
+            excluded_item = self.table.item(row, 1)
+            decision.excluded = bool(
+                excluded_item is not None and excluded_item.checkState() == Qt.Checked and not decision.enabled
+            )
             if finding.replacement.strip():
                 decision.replacement = finding.replacement.strip()
-
-    def mark_selected_word_excluded(self) -> None:
-        if not self.is_word_source():
-            QMessageBox.information(self, "除外確定", "Wordファイルの検査後に利用できます。")
-            return
-        self.update_findings_from_table()
-        self._sync_word_decisions_from_findings()
-        rows = sorted({index.row() for index in self.table.selectedIndexes()})
-        if not rows:
-            QMessageBox.information(self, "除外確定", "対象の行を選択してください。")
-            return
-        for row in rows:
-            if row < len(self.word_decisions):
-                self.word_decisions[row].enabled = False
-                self.word_decisions[row].excluded = True
-        self.findings = [_finding_from_word_decision(decision) for decision in self.word_decisions]
-        self.refresh_table()
-        self.status_label.setText(f"{len(rows)} 件を確認済み・除外(原文維持)にしました。")
 
     def update_pdf_review_button(self) -> None:
         self.pdf_review_button.setEnabled(self.is_pdf_source() and isinstance(self.processor, PdfPrivacyProcessor) and bool(self.processor.temp_pdf))
