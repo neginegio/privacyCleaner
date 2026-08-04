@@ -37,15 +37,41 @@ from .pdf_processor import (
 )
 from .pdf_review_dialog import PdfCandidateReviewDialog
 from .resources import resource_path
+from .word_processor import (
+    WORD_SUPPORTED_EXTENSION,
+    WordPrivacyProcessor,
+    WordReplacementDecision,
+    word_candidate_location_label,
+    word_finding_reason,
+    word_finding_status,
+    write_word_findings_csv,
+)
 
 
 EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
 PDF_EXTENSIONS = {".pdf"}
-SUPPORTED_EXTENSIONS = EXCEL_EXTENSIONS | PDF_EXTENSIONS
+WORD_EXTENSIONS = {WORD_SUPPORTED_EXTENSION}
+SUPPORTED_EXTENSIONS = EXCEL_EXTENSIONS | PDF_EXTENSIONS | WORD_EXTENSIONS
 
 
 def asset_path(relative_path: str) -> Path:
     return resource_path(relative_path)
+
+
+def _finding_from_word_decision(decision: WordReplacementDecision) -> Finding:
+    candidate = decision.candidate
+    return Finding(
+        enabled=decision.enabled,
+        sheet=word_candidate_location_label(candidate),
+        cell="",
+        entity_type=candidate.category,
+        detection_kind=word_finding_status(decision),
+        original=candidate.text,
+        replacement=decision.replacement,
+        reason=word_finding_reason(decision),
+        start=candidate.char_start,
+        end=candidate.char_end,
+    )
 
 
 class ExcelPrivacyCleanerWindow(QMainWindow):
@@ -59,9 +85,10 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         self.setMinimumSize(980, 640)
         self.setAcceptDrops(True)
 
-        self.processor: ExcelPrivacyProcessor | PdfPrivacyProcessor = ExcelPrivacyProcessor()
+        self.processor: ExcelPrivacyProcessor | PdfPrivacyProcessor | WordPrivacyProcessor = ExcelPrivacyProcessor()
         self.source_path: Path | None = None
         self.findings: list[Finding] = []
+        self.word_decisions: list[WordReplacementDecision] = []
 
         self.path_label = QLabel("未選択")
         self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -82,7 +109,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
 
-        title = QLabel("Excel / PDF ファイルを選択してください。検出はこの PC 内だけで行い、原本は上書きしません。")
+        title = QLabel("Excel / PDF / Word ファイルを選択してください。検出はこの PC 内だけで行い、原本は上書きしません。")
         title.setStyleSheet("font-size: 15px; font-weight: 600;")
         layout.addWidget(title)
 
@@ -113,7 +140,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         self.update_mode_note()
 
         file_row = QHBoxLayout()
-        choose_button = QPushButton("Excel/PDFを選択")
+        choose_button = QPushButton("Excel/PDF/Wordを選択")
         scan_button = QPushButton("検査開始")
         convert_button = QPushButton("確認済みを変換保存")
         choose_button.clicked.connect(self.choose_file)
@@ -181,19 +208,25 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             self,
             "検査するファイルを選択",
             "",
-            "Supported files (*.xlsx *.xlsm *.pdf);;Excel files (*.xlsx *.xlsm);;PDF files (*.pdf)",
+            "Supported files (*.xlsx *.xlsm *.pdf *.docx);;Excel files (*.xlsx *.xlsm);;PDF files (*.pdf);;Word files (*.docx)",
         )
         if filename:
             self.set_source(Path(filename))
 
     def set_source(self, path: Path) -> None:
         if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-            QMessageBox.warning(self, "形式エラー", "対応形式は .xlsx / .xlsm / .pdf です。")
+            QMessageBox.warning(self, "形式エラー", "対応形式は .xlsx / .xlsm / .pdf / .docx です。")
             return
         self.processor.cleanup()
-        self.processor = PdfPrivacyProcessor() if path.suffix.lower() in PDF_EXTENSIONS else ExcelPrivacyProcessor()
+        if path.suffix.lower() in PDF_EXTENSIONS:
+            self.processor = PdfPrivacyProcessor()
+        elif path.suffix.lower() in WORD_EXTENSIONS:
+            self.processor = WordPrivacyProcessor()
+        else:
+            self.processor = ExcelPrivacyProcessor()
         self.source_path = path
         self.findings = []
+        self.word_decisions = []
         self.path_label.setText(str(path))
         self.update_mode_note()
         self.refresh_table()
@@ -209,7 +242,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
 
     def scan_file(self) -> None:
         if self.source_path is None:
-            QMessageBox.warning(self, "ファイル未選択", "Excel ファイルを選択してください。")
+            QMessageBox.warning(self, "ファイル未選択", "ファイルを選択してください。")
             return
         busy_cursor = False
         try:
@@ -221,7 +254,11 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             busy_cursor = True
             QApplication.processEvents()
             options = self.current_options()
-            self.findings = self.processor.scan(self.source_path, options=options)
+            if self.is_word_source() and isinstance(self.processor, WordPrivacyProcessor):
+                self.word_decisions = self.processor.scan(self.source_path, options=options)
+                self.findings = [_finding_from_word_decision(decision) for decision in self.word_decisions]
+            else:
+                self.findings = self.processor.scan(self.source_path, options=options)
             self.refresh_table()
             formula_count = (
                 self.processor.enabled_formula_replacement_count(self.findings, options=options)
@@ -231,12 +268,22 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             formula_note = (
                 f" 数式文字列化予定: {formula_count} 件。"
                 if formula_count
-                else (" PDFは全ページ確認が必要です。PDF候補確認を開いてください。" if self.is_pdf_source() else " 数式は維持します。")
+                else (
+                    " PDFは全ページ確認が必要です。PDF候補確認を開いてください。"
+                    if self.is_pdf_source()
+                    else (" Word固有の項目はありません。" if self.is_word_source() else " 数式は維持します。")
+                )
             )
             if self.is_pdf_source():
                 self.status_label.setText(
                     f"PDF検査完了: {len(self.findings)} 件を検出しました。"
                     "PDF候補確認で全ページを確認するまで、匿名化済みPDFとして出力できません。"
+                )
+            elif self.is_word_source():
+                review_required_count = sum(1 for finding in self.findings if finding.detection_kind == "要確認(未処理)")
+                self.status_label.setText(
+                    f"Word検査完了: {len(self.findings)} 件を検出しました。"
+                    f"要確認候補 {review_required_count} 件は変換前に承認(チェック)してください。"
                 )
             else:
                 self.status_label.setText(f"検査完了: {len(self.findings)} 件を検出しました。変換対象を確認してください。{formula_note}")
@@ -254,14 +301,38 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
 
     def convert_file(self) -> None:
         if self.source_path is None:
-            QMessageBox.warning(self, "ファイル未選択", "Excel ファイルを選択してください。")
+            QMessageBox.warning(self, "ファイル未選択", "ファイルを選択してください。")
             return
         busy_cursor = False
         try:
             self.update_findings_from_table()
             self.status_label.setText("変換中: 一時コピーへ置換を適用しています...")
             options = self.current_options()
-            if self.is_pdf_source() and isinstance(self.processor, PdfPrivacyProcessor):
+            if self.is_word_source() and isinstance(self.processor, WordPrivacyProcessor):
+                self._sync_word_decisions_from_findings()
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                busy_cursor = True
+                QApplication.processEvents()
+                result = self.processor.convert(self.source_path, self.word_decisions)
+                QApplication.restoreOverrideCursor()
+                busy_cursor = False
+                output_path = result.output_path
+                converted_count = result.converted_run_count + result.converted_property_count
+                self.history.insertItem(
+                    0,
+                    f"{datetime.now():%Y/%m/%d %H:%M:%S}  {options.mode_label}  {converted_count} 件変換  {output_path.name}  一時ファイル削除済み",
+                )
+                self.status_label.setText(f"保存完了: {output_path}")
+                warning_note = ("\n\n警告:\n" + "\n".join(result.warnings)) if result.warnings else ""
+                QMessageBox.information(
+                    self,
+                    "保存完了",
+                    "匿名化済み Word、検出・変換結果CSV、処理報告書を保存しました。\n\n"
+                    f"Word: {result.output_path}\nCSV: {result.csv_path}\n報告書: {result.report_path}"
+                    f"{warning_note}\n\n"
+                    "原本は上書きしていません。一時コピーは削除済みです。",
+                )
+            elif self.is_pdf_source() and isinstance(self.processor, PdfPrivacyProcessor):
                 can_output, reasons = final_output_status(
                     self.findings,
                     self.processor.page_quality,
@@ -339,6 +410,8 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             return
 
         self.update_findings_from_table()
+        if self.is_word_source():
+            self._sync_word_decisions_from_findings()
         default_name = self._default_csv_name()
         filename, _ = QFileDialog.getSaveFileName(
             self,
@@ -356,6 +429,8 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         try:
             if self.is_pdf_source():
                 write_pdf_findings_csv(path, self.findings)
+            elif self.is_word_source():
+                write_word_findings_csv(path, self.word_decisions)
             else:
                 write_findings_csv(path, self.findings)
             self.status_label.setText(f"CSV出力完了: {path}")
@@ -378,6 +453,10 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
 
     def refresh_table(self) -> None:
         self.table.setRowCount(0)
+        # Word candidate categories are fixed by detection and can't be edited
+        # after the fact (WordCandidate is immutable), unlike Excel/PDF's
+        # entity_type, so column 3 stays read-only for Word rows.
+        editable_offsets = {6} if self.is_word_source() else {3, 6}
         for row, finding in enumerate(self.findings):
             self.table.insertRow(row)
             enabled = QTableWidgetItem()
@@ -396,7 +475,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             ]
             for offset, value in enumerate(values, start=1):
                 item = QTableWidgetItem(value)
-                if offset not in (3, 6):
+                if offset not in editable_offsets:
                     item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 self.table.setItem(row, offset, item)
 
@@ -453,6 +532,15 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
 
     def is_pdf_source(self) -> bool:
         return self.source_path is not None and self.source_path.suffix.lower() in PDF_EXTENSIONS
+
+    def is_word_source(self) -> bool:
+        return self.source_path is not None and self.source_path.suffix.lower() in WORD_EXTENSIONS
+
+    def _sync_word_decisions_from_findings(self) -> None:
+        for decision, finding in zip(self.word_decisions, self.findings):
+            decision.enabled = finding.enabled
+            if finding.replacement.strip():
+                decision.replacement = finding.replacement.strip()
 
     def update_pdf_review_button(self) -> None:
         self.pdf_review_button.setEnabled(self.is_pdf_source() and isinstance(self.processor, PdfPrivacyProcessor) and bool(self.processor.temp_pdf))

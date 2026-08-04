@@ -654,7 +654,7 @@ def _format_residual_detail(residual: dict[str, set[str]]) -> str:
     )
 
 
-def _word_candidate_location_label(candidate: WordCandidate) -> str:
+def word_candidate_location_label(candidate: WordCandidate) -> str:
     if candidate.story_type == "document_property":
         return f"文書プロパティ({candidate.property_name or ''})"
 
@@ -682,7 +682,7 @@ def _word_candidate_location_label(candidate: WordCandidate) -> str:
     return f"{story_label} 段落{candidate.paragraph_index + 1}"
 
 
-def _word_finding_status(decision: WordReplacementDecision) -> str:
+def word_finding_status(decision: WordReplacementDecision) -> str:
     candidate = decision.candidate
     if candidate.source == "hyperlink_target":
         return "ハイパーリンク対象外"
@@ -692,7 +692,7 @@ def _word_finding_status(decision: WordReplacementDecision) -> str:
     return "要確認(未処理)" if requires_review else "維持(手動)"
 
 
-def _word_finding_reason(decision: WordReplacementDecision) -> str:
+def word_finding_reason(decision: WordReplacementDecision) -> str:
     candidate = decision.candidate
     base = f"{candidate.detection_rule}(信頼度{candidate.confidence:.2f})"
     suffix = {
@@ -701,7 +701,7 @@ def _word_finding_reason(decision: WordReplacementDecision) -> str:
         "要確認(未処理)": " / 要確認候補が未承認のため対象外",
         "維持(手動)": " / 利用者が対象を解除し原文を維持",
         "自動変換": "",
-    }[_word_finding_status(decision)]
+    }[word_finding_status(decision)]
     return base + suffix
 
 
@@ -726,13 +726,13 @@ def write_word_findings_csv(path: Path, decisions: list[WordReplacementDecision]
             writer.writerow(
                 [
                     "対象" if decision.enabled else "維持",
-                    _word_finding_status(decision),
-                    _word_candidate_location_label(candidate),
+                    word_finding_status(decision),
+                    word_candidate_location_label(candidate),
                     candidate.category,
                     candidate.detection_rule,
                     candidate.text,
                     decision.replacement,
-                    _word_finding_reason(decision),
+                    word_finding_reason(decision),
                 ]
             )
 
@@ -804,14 +804,14 @@ def write_word_audit_json(
         "findings": [
             {
                 "category": decision.candidate.category,
-                "location": _word_candidate_location_label(decision.candidate),
+                "location": word_candidate_location_label(decision.candidate),
                 "detection_rule": decision.candidate.detection_rule,
                 "confidence": decision.candidate.confidence,
                 "source": decision.candidate.source,
-                "status": _word_finding_status(decision),
+                "status": word_finding_status(decision),
                 "enabled": decision.enabled,
                 "replacement": decision.replacement,
-                "reason": _word_finding_reason(decision),
+                "reason": word_finding_reason(decision),
                 "original_hmac_sha256": _word_hmac_digest(decision.candidate.text) if decision.candidate.text else "",
             }
             for decision in decisions

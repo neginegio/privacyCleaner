@@ -29,7 +29,7 @@ from excel_privacy_cleaner.word_processor import (  # noqa: E402
     write_word_findings_csv,
     write_word_processing_report,
     write_word_audit_json,
-    _word_candidate_location_label,
+    word_candidate_location_label,
     _find_residual_text,
 )
 
@@ -655,37 +655,37 @@ def _base_location_candidate(**overrides) -> WordCandidate:
 
 def test_word_candidate_location_label_covers_all_container_types() -> None:
     body_paragraph = _base_location_candidate(paragraph_index=3)
-    assert_true(_word_candidate_location_label(body_paragraph) == "本文 段落4", "Body paragraph label")
+    assert_true(word_candidate_location_label(body_paragraph) == "本文 段落4", "Body paragraph label")
 
     body_cell = _base_location_candidate(container_type="table_cell", table_index=0, row_index=1, cell_index=0, cell_paragraph_index=0)
-    assert_true(_word_candidate_location_label(body_cell) == "本文 表1 行2列1", "Body table cell label")
+    assert_true(word_candidate_location_label(body_cell) == "本文 表1 行2列1", "Body table cell label")
 
     body_cell_second_paragraph = _base_location_candidate(
         container_type="table_cell", table_index=0, row_index=1, cell_index=0, cell_paragraph_index=1
     )
-    assert_true(_word_candidate_location_label(body_cell_second_paragraph) == "本文 表1 行2列1 段落2", "Body table cell second paragraph label")
+    assert_true(word_candidate_location_label(body_cell_second_paragraph) == "本文 表1 行2列1 段落2", "Body table cell second paragraph label")
 
     header_paragraph = _base_location_candidate(
         story_type="header", header_footer_type="default", section_index=0, paragraph_index=0
     )
-    assert_true(_word_candidate_location_label(header_paragraph) == "ヘッダー(default) 段落1", "Header paragraph label")
+    assert_true(word_candidate_location_label(header_paragraph) == "ヘッダー(default) 段落1", "Header paragraph label")
 
     header_cell_section2 = _base_location_candidate(
         story_type="header", header_footer_type="default", section_index=1,
         container_type="table_cell", table_index=0, row_index=0, cell_index=0, cell_paragraph_index=0,
     )
     assert_true(
-        _word_candidate_location_label(header_cell_section2) == "ヘッダー(default) セクション2 表1 行1列1",
+        word_candidate_location_label(header_cell_section2) == "ヘッダー(default) セクション2 表1 行1列1",
         "Header table cell in non-first section label",
     )
 
     footer_paragraph = _base_location_candidate(story_type="footer", header_footer_type="default", paragraph_index=0)
-    assert_true(_word_candidate_location_label(footer_paragraph) == "フッター(default) 段落1", "Footer paragraph label")
+    assert_true(word_candidate_location_label(footer_paragraph) == "フッター(default) 段落1", "Footer paragraph label")
 
     document_property = _base_location_candidate(
         story_type="document_property", container_type="property", property_name="author", paragraph_index=0
     )
-    assert_true(_word_candidate_location_label(document_property) == "文書プロパティ(author)", "Document property label")
+    assert_true(word_candidate_location_label(document_property) == "文書プロパティ(author)", "Document property label")
 
 
 def test_findings_csv_has_expected_headers_and_status_rows() -> None:
