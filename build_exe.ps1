@@ -19,6 +19,9 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
     --add-data "assets\app_icon.ico;assets" `
     --add-data "assets\app_icon.png;assets" `
     --add-data "resources\tessdata;resources\tessdata" `
+    --collect-all ja_ginza `
+    --collect-all spacy_legacy `
+    --collect-all ginza `
     --paths .\src `
     .\native_main.py
 
