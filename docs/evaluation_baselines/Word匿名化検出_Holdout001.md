@@ -6,9 +6,9 @@ Phase 2.1 frozen候補と、独立作成したHoldout001 ground truthを初め�
 
 ## 固定対象
 
-- Phase 2.1 commit: `ca7b01e`
+- Phase 2.1 commit: `ca7b01e+ginza_ner`
 - Word SHA-256: `de87ba901b268978506b72c5b52c7d5a4a6c07f35c4e924411fc6e02cf06a376`
-- candidate SHA-256: `b54b3ceb19a92a53b81ec57317483a8bd49e42c32ffa90af418bbfd18c4f620f`
+- candidate SHA-256: `e197f8b358cc292a27ad077c4fdd01b5b4f9d4583c5386ddfaa01e569715f2d6`
 - ground truth SHA-256: `85da8b98fbdd07c5084d11304f9a2d3813c6204e1100a19deafc58a7727fcf59`
 
 ## 評価上の解釈
@@ -20,31 +20,31 @@ Phase 2.1 frozen候補と、独立作成したHoldout001 ground truthを初め�
 - This is an unknown-real-document evaluation for Phase 2.1.
 - Development and post-tuning Validation 1.0/1.0 results must be kept separate from this holdout result.
 - A single holdout document is not enough to make a general claim about Word-wide performance.
-- Company names and personal names dropped substantially: company matched 0/5, person matched 0/6.
-- 9 of 13 missed ground truths had no generated candidate, so the drop is not explained only by strict exact-span matching.
+- Company names and personal names dropped substantially: company matched 2/5, person matched 5/6.
+- 2 of 6 missed ground truths had no generated candidate, so the drop is not explained only by strict exact-span matching.
 
 ## Overall
 
 | 指標 | 値 |
 |---|---:|
 | ground_truth_count | `20` |
-| candidate_count | `13` |
-| matched_ground_truth_count | `7` |
-| missed_ground_truth_count | `13` |
-| true_positive_candidate_count | `7` |
-| false_positive_candidate_count | `6` |
-| recall | `0.35` |
-| candidate_precision | `0.538` |
-| exact_span_match_count | `7` |
+| candidate_count | `21` |
+| matched_ground_truth_count | `14` |
+| missed_ground_truth_count | `6` |
+| true_positive_candidate_count | `14` |
+| false_positive_candidate_count | `7` |
+| recall | `0.7` |
+| candidate_precision | `0.667` |
+| exact_span_match_count | `14` |
 
 ## Category Results
 
 | カテゴリ | GT | Candidates | Matched | Missed | TP Candidate | FP Candidate |
 |---|---:|---:|---:|---:|---:|---:|
 | メールアドレス | `0` | `0` | `0` | `0` | `0` | `0` |
-| 会社名 | `5` | `3` | `0` | `5` | `0` | `3` |
+| 会社名 | `5` | `6` | `2` | `3` | `2` | `4` |
 | 住所 | `0` | `0` | `0` | `0` | `0` | `0` |
-| 氏名 | `6` | `1` | `0` | `6` | `0` | `1` |
+| 氏名 | `6` | `6` | `5` | `1` | `5` | `1` |
 | 銀行名 | `9` | `9` | `7` | `2` | `7` | `2` |
 | 電話番号 | `0` | `0` | `0` | `0` | `0` | `0` |
 
@@ -56,7 +56,7 @@ Phase 2.1 frozen候補と、独立作成したHoldout001 ground truthを初め�
 |---|---:|
 | span過大 | `2` |
 | カテゴリ誤分類 | `2` |
-| 候補自体が生成されなかった | `9` |
+| 候補自体が生成されなかった | `2` |
 
 ### False Positive
 
@@ -64,13 +64,13 @@ Phase 2.1 frozen候補と、独立作成したHoldout001 ground truthを初め�
 |---|---:|
 | span過大 | `3` |
 | カテゴリ誤分類 | `2` |
-| 一般語誤検出 | `1` |
+| 一般語誤検出 | `2` |
 
 ## Conversion Residual Check(置換後残存なし)
 
 - verdict: `blocked`
 - blocked_guard: `overlap_guard`
-- converted_matched_candidate_count: `7`
+- converted_matched_candidate_count: `14`
 
 ## Notes
 

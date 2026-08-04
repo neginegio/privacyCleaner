@@ -1,12 +1,12 @@
 {
   "baseline_name": "Word candidate detection Holdout001",
   "holdout_id": "Holdout001",
-  "evaluated_at_utc": "2026-08-04T09:49:46.093364+00:00",
-  "phase2_1_frozen_commit": "ca7b01e",
+  "evaluated_at_utc": "2026-08-04T13:03:58.874320+00:00",
+  "phase2_1_frozen_commit": "ca7b01e+ginza_ner",
   "word_sha256": "de87ba901b268978506b72c5b52c7d5a4a6c07f35c4e924411fc6e02cf06a376",
-  "candidate_sha256": "b54b3ceb19a92a53b81ec57317483a8bd49e42c32ffa90af418bbfd18c4f620f",
+  "candidate_sha256": "e197f8b358cc292a27ad077c4fdd01b5b4f9d4583c5386ddfaa01e569715f2d6",
   "ground_truth_sha256": "85da8b98fbdd07c5084d11304f9a2d3813c6204e1100a19deafc58a7727fcf59",
-  "candidate_count_fixed_before_evaluation": 14,
+  "candidate_count_fixed_before_evaluation": 22,
   "ground_truth_count_completed_before_evaluation": 22,
   "formal_scope": {
     "included_story_types": [
@@ -30,14 +30,14 @@
   },
   "metrics": {
     "ground_truth_count": 20,
-    "candidate_count": 13,
-    "matched_ground_truth_count": 7,
-    "missed_ground_truth_count": 13,
-    "true_positive_candidate_count": 7,
-    "false_positive_candidate_count": 6,
-    "recall": 0.35,
-    "candidate_precision": 0.538,
-    "exact_span_match_count": 7
+    "candidate_count": 21,
+    "matched_ground_truth_count": 14,
+    "missed_ground_truth_count": 6,
+    "true_positive_candidate_count": 14,
+    "false_positive_candidate_count": 7,
+    "recall": 0.7,
+    "candidate_precision": 0.667,
+    "exact_span_match_count": 14
   },
   "category_results": {
     "メールアドレス": {
@@ -50,11 +50,11 @@
     },
     "会社名": {
       "ground_truth_count": 5,
-      "candidate_count": 3,
-      "matched": 0,
-      "missed": 5,
-      "true_positive_candidate": 0,
-      "false_positive_candidate": 3
+      "candidate_count": 6,
+      "matched": 2,
+      "missed": 3,
+      "true_positive_candidate": 2,
+      "false_positive_candidate": 4
     },
     "住所": {
       "ground_truth_count": 0,
@@ -66,10 +66,10 @@
     },
     "氏名": {
       "ground_truth_count": 6,
-      "candidate_count": 1,
-      "matched": 0,
-      "missed": 6,
-      "true_positive_candidate": 0,
+      "candidate_count": 6,
+      "matched": 5,
+      "missed": 1,
+      "true_positive_candidate": 5,
       "false_positive_candidate": 1
     },
     "銀行名": {
@@ -92,12 +92,12 @@
   "missed_cause_counts": {
     "span過大": 2,
     "カテゴリ誤分類": 2,
-    "候補自体が生成されなかった": 9
+    "候補自体が生成されなかった": 2
   },
   "false_positive_cause_counts": {
     "span過大": 3,
     "カテゴリ誤分類": 2,
-    "一般語誤検出": 1
+    "一般語誤検出": 2
   },
   "metadata_ground_truth_count": 2,
   "unsupported_handling": "Unsupported regions are recorded as a separate safety issue and are not included in the Phase 2.1 formal recall denominator.",
@@ -109,13 +109,13 @@
     "This is an unknown-real-document evaluation for Phase 2.1.",
     "Development and post-tuning Validation 1.0/1.0 results must be kept separate from this holdout result.",
     "A single holdout document is not enough to make a general claim about Word-wide performance.",
-    "Company names and personal names dropped substantially: company matched 0/5, person matched 0/6.",
-    "9 of 13 missed ground truths had no generated candidate, so the drop is not explained only by strict exact-span matching."
+    "Company names and personal names dropped substantially: company matched 2/5, person matched 5/6.",
+    "2 of 6 missed ground truths had no generated candidate, so the drop is not explained only by strict exact-span matching."
   ],
   "privacy_note": "This public record intentionally excludes original text, candidate text, ground truth text, and detailed spans containing real information.",
-  "private_error_details_sha256": "f049e67f8342292924315e4cbee48649cd98d0c4a4dd5ba0139fbcdcb7f4ce13",
+  "private_error_details_sha256": "4bc3392644cc6f15e8e22ea666f04fcbe24072f1caecd8563b08227254b41d14",
   "conversion_residual_check_performed": true,
   "conversion_residual_verdict": "blocked",
   "conversion_residual_blocked_guard": "overlap_guard",
-  "converted_matched_candidate_count": 7
+  "converted_matched_candidate_count": 14
 }
