@@ -18,6 +18,7 @@ from typing import Any, Iterator
 from docx import Document
 
 from .excel_processor import AliasBook, ProcessingOptions, replacement_for
+from .ginza_japanese import GinzaEntityDetector, WORD_NLP_CONFIDENCE, WORD_NLP_DETECTION_RULE
 from .presidio_japanese import JapanesePresidioDetector, entity_label
 
 
@@ -365,6 +366,7 @@ def detect_word_candidates(path: Path) -> tuple[WordStructureInventory, tuple[Wo
 
 def candidates_for_inventory(inventory: WordStructureInventory) -> tuple[WordCandidate, ...]:
     detector = JapanesePresidioDetector()
+    ginza_detector = GinzaEntityDetector()
     candidates: list[WordCandidate] = []
     seen: set[tuple[str, str, int, int, str, str]] = set()
     runs_by_location = _runs_by_paragraph_location(inventory.runs)
@@ -373,7 +375,7 @@ def candidates_for_inventory(inventory: WordStructureInventory) -> tuple[WordCan
         if not paragraph.text.strip():
             continue
         runs = runs_by_location.get(_paragraph_location_id(paragraph), ())
-        _append_text_candidates(candidates, seen, inventory, paragraph, paragraph.text, runs, detector, source="paragraph")
+        _append_text_candidates(candidates, seen, inventory, paragraph, paragraph.text, runs, detector, ginza_detector, source="paragraph")
 
     for hyperlink in inventory.hyperlinks:
         if hyperlink.url:
@@ -381,7 +383,7 @@ def candidates_for_inventory(inventory: WordStructureInventory) -> tuple[WordCan
 
     for property_name, value in _document_property_values(inventory.document_properties):
         if value:
-            _append_property_candidates(candidates, seen, inventory, property_name, value, detector)
+            _append_property_candidates(candidates, seen, inventory, property_name, value, detector, ginza_detector)
 
     return tuple(candidates)
 
@@ -1088,10 +1090,11 @@ def _append_text_candidates(
     text: str,
     runs: tuple[WordTextRun, ...],
     detector: JapanesePresidioDetector,
+    ginza_detector: GinzaEntityDetector | None,
     *,
     source: str,
 ) -> None:
-    for start, end, category, rule, confidence, original_category in _word_detector_results(text, detector):
+    for start, end, category, rule, confidence, original_category in _word_detector_results(text, detector, ginza_detector):
         _append_candidate(
             candidates,
             seen,
@@ -1155,6 +1158,7 @@ def _append_property_candidates(
     property_name: str,
     value: str,
     detector: JapanesePresidioDetector,
+    ginza_detector: GinzaEntityDetector | None,
 ) -> None:
     paragraph = WordParagraphText(
         story_type="document_property",
@@ -1165,7 +1169,7 @@ def _append_property_candidates(
         element_path=f"docProps/core.xml/{property_name}",
         part_name="/docProps/core.xml",
     )
-    for start, end, category, rule, confidence, original_category in _word_detector_results(value, detector):
+    for start, end, category, rule, confidence, original_category in _word_detector_results(value, detector, ginza_detector):
         _append_candidate(
             candidates,
             seen,
@@ -1242,7 +1246,11 @@ def _append_candidate(
     )
 
 
-def _word_detector_results(text: str, detector: JapanesePresidioDetector) -> list[tuple[int, int, str, str, float, str]]:
+def _word_detector_results(
+    text: str,
+    detector: JapanesePresidioDetector,
+    ginza_detector: GinzaEntityDetector | None = None,
+) -> list[tuple[int, int, str, str, float, str]]:
     results: list[tuple[int, int, str, str, float, str]] = []
     for detector_result in detector.analyze(text):
         label = _normalize_word_category(entity_label(detector_result.entity_type))
@@ -1257,7 +1265,23 @@ def _word_detector_results(text: str, detector: JapanesePresidioDetector) -> lis
             continue
         results.append((start, end, label, "JapanesePresidioDetector", float(detector_result.score), detector_result.entity_type))
     results.extend(_regex_candidate_results(text))
+    if ginza_detector is not None:
+        results.extend(_ginza_candidate_results(text, ginza_detector))
     return _select_non_overlapping_word_results(text, results)
+
+
+def _ginza_candidate_results(
+    text: str,
+    ginza_detector: GinzaEntityDetector,
+) -> list[tuple[int, int, str, str, float, str]]:
+    results: list[tuple[int, int, str, str, float, str]] = []
+    for nlp_result in ginza_detector.analyze(text):
+        start, end = _trim_candidate_span(text, nlp_result.start, nlp_result.end, nlp_result.category)
+        value = text[start:end]
+        if _is_generic_word_false_positive(nlp_result.category, value):
+            continue
+        results.append((start, end, nlp_result.category, WORD_NLP_DETECTION_RULE, WORD_NLP_CONFIDENCE, nlp_result.raw_label))
+    return results
 
 
 def _regex_candidate_results(text: str) -> list[tuple[int, int, str, str, float, str]]:
@@ -1377,16 +1401,35 @@ def _select_non_overlapping_word_results(
         for item in results
         if 0 <= item[0] < item[1] <= len(text) and len(text[item[0] : item[1]].strip()) >= 2
     ]
-    candidates.sort(key=lambda item: (item[4], item[1] - item[0]), reverse=True)
+    pattern_based = [item for item in candidates if item[3] != WORD_NLP_DETECTION_RULE]
+    nlp_based = [item for item in candidates if item[3] == WORD_NLP_DETECTION_RULE]
+
+    pattern_based.sort(key=lambda item: (item[4], item[1] - item[0]), reverse=True)
     selected: list[tuple[int, int, str, str, float, str]] = []
     occupied_by_category: dict[str, list[range]] = {}
-    for item in candidates:
+    for item in pattern_based:
         start, end, category, *_rest = item
         current = range(start, end)
         if any(current.start < existing.stop and existing.start < current.stop for existing in occupied_by_category.get(category, [])):
             continue
         selected.append(item)
         occupied_by_category.setdefault(category, []).append(current)
+
+    # NLP-sourced candidates only fill spans no pattern/dictionary rule has
+    # already claimed, in any category -- they exist to catch what those
+    # rules structurally cannot see, not to duplicate an existing hit under a
+    # different category label (e.g. a bank name GiNZA also tags as a
+    # generic organization).
+    occupied_any = [range(item[0], item[1]) for item in selected]
+    nlp_based.sort(key=lambda item: item[1] - item[0], reverse=True)
+    for item in nlp_based:
+        start, end, *_rest = item
+        current = range(start, end)
+        if any(current.start < existing.stop and existing.start < current.stop for existing in occupied_any):
+            continue
+        selected.append(item)
+        occupied_any.append(current)
+
     selected.sort(key=lambda item: (item[0], item[1], item[2]))
     return selected
 
@@ -1424,6 +1467,13 @@ def _trim_candidate_span(text: str, start: int, end: int, category: str) -> tupl
         if stop_match and stop_match.start() > 0:
             end = start + stop_match.start()
             value = text[start:end]
+
+    if category in {"会社名", "氏名"}:
+        for suffix in ("様", "さん", "殿", "氏"):
+            if value.endswith(suffix) and len(value) > len(suffix):
+                end -= len(suffix)
+                value = text[start:end]
+                break
 
     while start < end and text[start] in " \t　:：":
         start += 1

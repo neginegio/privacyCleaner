@@ -105,6 +105,16 @@ def create_low_confidence_name_fixture(path: Path) -> None:
     document.save(path)
 
 
+def create_bare_company_name_fixture(path: Path) -> None:
+    # Reproduces a real recall gap: pattern/dictionary rules only recognize a
+    # company name when it carries a legal-entity marker (株式会社 etc.); a
+    # bare short-form mention elsewhere in the document was previously
+    # invisible to every detection rule, not just low-confidence.
+    document = Document()
+    document.add_paragraph("場所　アルプススチール様1階応接室")
+    document.save(path)
+
+
 def create_high_confidence_only_fixture(path: Path) -> None:
     document = Document()
     document.add_paragraph("連絡先電話は090-1111-2222です。")
@@ -478,6 +488,33 @@ def test_low_confidence_candidate_blocks_by_default() -> None:
             raised = True
             assert_true("未確認候補" in str(exc), "Error should identify the block as an unreviewed candidate")
         assert_true(raised, "Leaving a low-confidence candidate disabled must block conversion")
+
+
+def test_ginza_ner_catches_bare_company_name_pattern_rules_miss() -> None:
+    with tempfile.TemporaryDirectory(prefix="word_replacement_") as tmpdir:
+        tmp = Path(tmpdir)
+        source = tmp / "fixture.docx"
+        create_bare_company_name_fixture(source)
+
+        processor = WordPrivacyProcessor()
+        decisions = processor.scan(source)
+
+        ginza_decisions = [d for d in decisions if d.candidate.detection_rule == "ginza_ner"]
+        assert_true(
+            bool(ginza_decisions),
+            "GiNZA should surface at least one candidate for the bare company name that pattern/dictionary rules structurally cannot see",
+        )
+        assert_true(
+            any(d.candidate.text == "アルプススチール" for d in ginza_decisions),
+            "GiNZA candidate span should exclude the trailing honorific (様), matching the plain company name exactly",
+        )
+        for decision in ginza_decisions:
+            assert_true(not decision.enabled, "GiNZA-sourced candidates must always default to review-required, never auto-convert")
+            assert_true(decision.candidate.confidence < 0.75, "GiNZA-sourced confidence must stay below the auto-convert threshold")
+            assert_true(
+                "ginza_ner" in word_finding_reason(decision),
+                "The findings list/reason text must clearly identify this as an NLP judgment, not a pattern/dictionary rule",
+            )
 
 
 def test_review_required_candidate_allows_conversion_when_enabled() -> None:
