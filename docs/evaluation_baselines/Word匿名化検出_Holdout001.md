@@ -8,7 +8,7 @@ Phase 2.1 frozen候補と、独立作成したHoldout001 ground truthを初め�
 
 - Phase 2.1 commit: `ca7b01e`
 - Word SHA-256: `de87ba901b268978506b72c5b52c7d5a4a6c07f35c4e924411fc6e02cf06a376`
-- candidate SHA-256: `a93d7944f6c06342155e2ecb4a11f44a1bc32bd1f00adfa984d913708104ffbd`
+- candidate SHA-256: `b54b3ceb19a92a53b81ec57317483a8bd49e42c32ffa90af418bbfd18c4f620f`
 - ground truth SHA-256: `85da8b98fbdd07c5084d11304f9a2d3813c6204e1100a19deafc58a7727fcf59`
 
 ## 評価上の解釈
@@ -65,6 +65,12 @@ Phase 2.1 frozen候補と、独立作成したHoldout001 ground truthを初め�
 | span過大 | `3` |
 | カテゴリ誤分類 | `2` |
 | 一般語誤検出 | `1` |
+
+## Conversion Residual Check(置換後残存なし)
+
+- verdict: `blocked`
+- blocked_guard: `overlap_guard`
+- converted_matched_candidate_count: `7`
 
 ## Notes
 

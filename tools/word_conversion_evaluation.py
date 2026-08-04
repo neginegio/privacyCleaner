@@ -21,12 +21,32 @@ TruthKey = tuple[str, str, int, int]
 
 @dataclass(frozen=True)
 class ConversionResidualReport:
-    conversion_result: WordConversionResult
+    conversion_result: WordConversionResult | None
     converted_matched_candidate_count: int
     convert_internal_residual_warning: bool
     matched_truth_readable_text_residual: tuple[str, ...]
     matched_truth_internal_xml_residual: dict[str, list[str]]
-    verdict: str  # "pass" | "fail"
+    verdict: str  # "pass" | "fail" | "blocked"
+    blocked_guard: str = ""  # short classification only, never the raw guard message (which may embed candidate text)
+
+
+_GUARD_CLASSIFIERS = (
+    ("先に検査を実行してください。", "not_scanned"),
+    ("ハイパーリンクURLの置換は未対応です。", "hyperlink_target_guard"),
+    ("未確認候補が", "review_required_guard"),
+    ("未対応領域が検出されたため外部共有用の出力を停止しました。", "unsupported_features_guard_external"),
+    ("構造が変化しました。再スキャンしてください。", "integrity_guard"),
+    ("検出候補の範囲が重複しています", "overlap_guard"),
+    ("の検出候補の範囲が重複しています。", "overlap_guard_property"),
+    ("内部XML残存検査で匿名化対象の原文が検出されたため外部共有用の出力を停止しました。", "residual_guard_external"),
+)
+
+
+def _classify_guard(message: str) -> str:
+    for prefix, tag in _GUARD_CLASSIFIERS:
+        if prefix in message:
+            return tag
+    return "unknown_guard"
 
 
 def candidate_key(candidate: WordCandidate) -> TruthKey:
@@ -52,7 +72,23 @@ def run_conversion_and_check_residual(
     enable_all_non_hyperlink_decisions(decisions)
     matched = [decision for decision in decisions if decision.enabled and candidate_key(decision.candidate) in truth_keys]
 
-    result = processor.convert(docx_path, decisions, output_dir=output_dir, write_artifacts=False)
+    try:
+        result = processor.convert(docx_path, decisions, output_dir=output_dir, write_artifacts=False)
+    except RuntimeError as exc:
+        # A guard correctly refused to convert (e.g. an overlap between two
+        # detector rules found only in real data). This is itself a valid,
+        # honest evaluation outcome -- record it, never the raw message
+        # (which may embed candidate original text), and never route around
+        # it by picking a candidate to disable on the evaluator's behalf.
+        return ConversionResidualReport(
+            conversion_result=None,
+            converted_matched_candidate_count=len(matched),
+            convert_internal_residual_warning=False,
+            matched_truth_readable_text_residual=(),
+            matched_truth_internal_xml_residual={},
+            verdict="blocked",
+            blocked_guard=_classify_guard(str(exc)),
+        )
 
     output_inventory = extract_word_structure(result.output_path)
     combined_text = "\n".join(paragraph.text for paragraph in output_inventory.paragraphs)

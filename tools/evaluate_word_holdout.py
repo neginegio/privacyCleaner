@@ -70,15 +70,17 @@ def main() -> int:
         report = run_conversion_and_check_residual(args.docx, truth_keys, conversion_check_dir)
         conversion_residual_private = {
             "verdict": report.verdict,
+            "blocked_guard": report.blocked_guard,
             "converted_matched_candidate_count": report.converted_matched_candidate_count,
             "convert_internal_residual_warning": report.convert_internal_residual_warning,
             "matched_truth_readable_text_residual_count": len(report.matched_truth_readable_text_residual),
             "matched_truth_internal_xml_residual_parts": sorted(report.matched_truth_internal_xml_residual),
-            "warnings": list(report.conversion_result.warnings),
+            "warnings": list(report.conversion_result.warnings) if report.conversion_result else [],
         }
         conversion_residual_public = {
             "conversion_residual_check_performed": True,
             "conversion_residual_verdict": report.verdict,
+            "conversion_residual_blocked_guard": report.blocked_guard,
             "converted_matched_candidate_count": report.converted_matched_candidate_count,
         }
 
@@ -373,6 +375,10 @@ def write_public_csv(path: Path, payload: dict[str, object]) -> None:
         for cause, count in payload["false_positive_cause_counts"].items():
             writer.writerow(["false_positive_cause", cause, "count", count])
         writer.writerow(["metadata", "document_property", "ground_truth_count", payload["metadata_ground_truth_count"]])
+        writer.writerow(["conversion_residual_check", "all", "performed", payload.get("conversion_residual_check_performed", False)])
+        writer.writerow(["conversion_residual_check", "all", "verdict", payload.get("conversion_residual_verdict", "not_run")])
+        writer.writerow(["conversion_residual_check", "all", "blocked_guard", payload.get("conversion_residual_blocked_guard", "")])
+        writer.writerow(["conversion_residual_check", "all", "converted_matched_candidate_count", payload.get("converted_matched_candidate_count", 0)])
 
 
 def write_public_md(path: Path, payload: dict[str, object]) -> None:
@@ -429,6 +435,8 @@ def write_public_md(path: Path, payload: dict[str, object]) -> None:
     lines.extend(["", "## Conversion Residual Check(置換後残存なし)", ""])
     if payload.get("conversion_residual_check_performed"):
         lines.append(f"- verdict: `{payload['conversion_residual_verdict']}`")
+        if payload.get("conversion_residual_blocked_guard"):
+            lines.append(f"- blocked_guard: `{payload['conversion_residual_blocked_guard']}`")
         lines.append(f"- converted_matched_candidate_count: `{payload['converted_matched_candidate_count']}`")
     else:
         lines.append("- 未実施")

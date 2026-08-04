@@ -1,10 +1,10 @@
 {
   "baseline_name": "Word candidate detection Holdout001",
   "holdout_id": "Holdout001",
-  "evaluated_at_utc": "2026-07-27T15:28:38.193244+00:00",
+  "evaluated_at_utc": "2026-08-04T09:49:46.093364+00:00",
   "phase2_1_frozen_commit": "ca7b01e",
   "word_sha256": "de87ba901b268978506b72c5b52c7d5a4a6c07f35c4e924411fc6e02cf06a376",
-  "candidate_sha256": "a93d7944f6c06342155e2ecb4a11f44a1bc32bd1f00adfa984d913708104ffbd",
+  "candidate_sha256": "b54b3ceb19a92a53b81ec57317483a8bd49e42c32ffa90af418bbfd18c4f620f",
   "ground_truth_sha256": "85da8b98fbdd07c5084d11304f9a2d3813c6204e1100a19deafc58a7727fcf59",
   "candidate_count_fixed_before_evaluation": 14,
   "ground_truth_count_completed_before_evaluation": 22,
@@ -113,5 +113,9 @@
     "9 of 13 missed ground truths had no generated candidate, so the drop is not explained only by strict exact-span matching."
   ],
   "privacy_note": "This public record intentionally excludes original text, candidate text, ground truth text, and detailed spans containing real information.",
-  "private_error_details_sha256": "f049e67f8342292924315e4cbee48649cd98d0c4a4dd5ba0139fbcdcb7f4ce13"
+  "private_error_details_sha256": "f049e67f8342292924315e4cbee48649cd98d0c4a4dd5ba0139fbcdcb7f4ce13",
+  "conversion_residual_check_performed": true,
+  "conversion_residual_verdict": "blocked",
+  "conversion_residual_blocked_guard": "overlap_guard",
+  "converted_matched_candidate_count": 7
 }

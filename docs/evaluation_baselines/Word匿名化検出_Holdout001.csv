@@ -51,3 +51,7 @@ false_positive_cause,span過大,count,3
 false_positive_cause,カテゴリ誤分類,count,2
 false_positive_cause,一般語誤検出,count,1
 metadata,document_property,ground_truth_count,2
+conversion_residual_check,all,performed,True
+conversion_residual_check,all,verdict,blocked
+conversion_residual_check,all,blocked_guard,overlap_guard
+conversion_residual_check,all,converted_matched_candidate_count,7
