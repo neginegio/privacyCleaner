@@ -12,6 +12,7 @@ dist/
 config/.privacy_cleaner_state_hmac.key
 ocr_quality_outputs/
 pdf_ocr_test_outputs/
+word_holdout_private/
 *.pdf
 *.log
 ocr_check_result.txt

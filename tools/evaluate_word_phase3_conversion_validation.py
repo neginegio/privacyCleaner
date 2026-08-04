@@ -54,6 +54,8 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="word_phase3_conversion_validation_") as tmpdir:
         report = run_conversion_and_check_residual(VALIDATION_DOCX, truth_keys, Path(tmpdir))
         result = report.conversion_result
+        if result is None:
+            raise RuntimeError(f"convert() was blocked by a guard ({report.blocked_guard}) on the validation dataset; expected a clean pass.")
 
         payload = {
             "baseline_name": "Word candidate detection + conversion Phase 3 conversion validation",
