@@ -1,0 +1,43 @@
+{
+  "baseline_name": "Word candidate detection + conversion Phase 3 conversion validation",
+  "status": "Word conversion + internal residual check validated (post Phase 2.1 frozen detection)",
+  "validation_docx_sha256": "028972970592182d8c8ccc1a48e0e591998c5ac1f6b088ad090f8efdc95fb1a8",
+  "ground_truth_sha256": "a036fd2711f0fd25c4b8d352db57566720ca14a6c17688952d697904f0b91810",
+  "reproduction_check": {
+    "performed": true,
+    "matches_phase2_1_frozen_metrics": true,
+    "phase2_1_frozen_metrics": {
+      "ground_truth_count": 24,
+      "candidate_count": 24,
+      "matched_ground_truth_count": 24,
+      "missed_ground_truth_count": 0,
+      "true_positive_candidate_count": 24,
+      "false_positive_candidate_count": 0,
+      "recall": 1.0,
+      "candidate_precision": 1.0,
+      "exact_span_match_count": 24
+    }
+  },
+  "conversion_metrics": {
+    "matched_ground_truth_count": 24,
+    "converted_matched_candidate_count": 24,
+    "converted_run_count": 22,
+    "converted_property_count": 0,
+    "review_required_count": 7,
+    "skipped_hyperlink_target_count": 0,
+    "warnings": [
+      "未対応領域が検出されました(未対応領域: custom_xml: 3件、text_holding_xml_part: 4件、tracked_changes: 1404件)。未対応領域内の匿名化は保証しない。分析継続用の範囲で利用し、外部共有する場合は内容を必ず確認してください。"
+    ]
+  },
+  "residual_check": {
+    "convert_internal_residual_warning": false,
+    "matched_truth_readable_text_residual_count": 0,
+    "matched_truth_internal_xml_residual_parts": [],
+    "verdict": "pass"
+  },
+  "method": {
+    "conversion_approval": "All non-hyperlink candidates enabled (as if reviewer-approved), mirroring tests/test_word_replacement.py::_enable_review_required",
+    "mode": "analysis (ProcessingOptions default); external mode not usable here because this fixture has known pre-existing unsupported_features (customXml + a tracked_changes false positive on styles.xml), unrelated to this check"
+  },
+  "scope_note": "This record covers development/validation-tier data only. Holdout evaluation (design doc step 10) has not been executed as part of this record; no holdout file, path, hash, or content was read to produce it."
+}
