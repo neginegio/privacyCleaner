@@ -29,6 +29,15 @@ def create_gui_fixture(path: Path) -> None:
     document.save(path)
 
 
+def create_overlapping_candidates_fixture(path: Path) -> None:
+    # Company detector matches "株式会社未来会議" [0:8); the bare-name heuristic
+    # matches "未来会議　細谷" [4:11) -- these overlap at [4:8), reproducing a
+    # real conflict seen with actual documents.
+    document = Document()
+    document.add_paragraph("株式会社未来会議　細谷")
+    document.save(path)
+
+
 def _silence_message_boxes(monkeypatch) -> list[tuple[str, str]]:
     calls: list[tuple[str, str]] = []
     for method in ("information", "warning", "critical", "question"):
@@ -80,6 +89,72 @@ def test_word_scan_and_convert_via_gui(monkeypatch) -> None:
 
             assert_true(any(name == "information" for name, _ in calls), "A success message box should have been shown")
             assert_true(window.history.count() == 1, "Conversion should append one history entry")
+        finally:
+            window.processor.cleanup()
+            window.close()
+            app.processEvents()
+
+
+def test_word_exclude_button_resolves_overlap_and_review_required_deadlock(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    calls = _silence_message_boxes(monkeypatch)
+
+    with tempfile.TemporaryDirectory(prefix="qt_app_word_overlap_") as tmpdir:
+        tmp = Path(tmpdir)
+        source = tmp / "fixture.docx"
+        create_overlapping_candidates_fixture(source)
+
+        window = ExcelPrivacyCleanerWindow()
+        try:
+            window.set_source(source)
+            window.scan_file()
+            assert_true(len(window.word_decisions) == 2, "Fixture should yield the company and the overlapping name candidate")
+
+            name_row = next(row for row, finding in enumerate(window.findings) if finding.entity_type == "氏名")
+            assert_true(not window.word_decisions[name_row].enabled, "Overlapping low-confidence name should default to disabled")
+
+            # Enabling both (company auto-enabled by default, name checked here
+            # too) must be blocked by the overlap guard.
+            window.table.item(name_row, 0).setCheckState(Qt.Checked)
+            window.convert_file()
+            assert_true(any(name == "critical" for name, _ in calls), "Enabling both overlapping candidates must raise an error, not silently convert")
+            calls.clear()
+
+            # Uncheck it again (still just "unresolved", not "reviewed") --
+            # must still be blocked, now by the review-required guard.
+            window.table.item(name_row, 0).setCheckState(Qt.Unchecked)
+            window.convert_file()
+            assert_true(any(name == "critical" for name, _ in calls), "Leaving a review-required candidate merely unchecked must still block")
+            calls.clear()
+
+            # Select the name row and mark it reviewed-and-excluded via the
+            # dedicated button -- this is the actual fix for the deadlock.
+            window.table.selectRow(name_row)
+            window.mark_selected_word_excluded()
+            assert_true(window.word_decisions[name_row].excluded, "Decision should now be marked excluded")
+            assert_true(not window.word_decisions[name_row].enabled, "Excluded decision must stay disabled")
+
+            result_holder: list[object] = []
+            original_convert = window.processor.convert
+
+            def capture_convert(*args, **kwargs):
+                result = original_convert(*args, **kwargs)
+                result_holder.append(result)
+                return result
+
+            monkeypatch.setattr(window.processor, "convert", capture_convert)
+            window.convert_file()
+            assert_true(bool(result_holder), "convert() should have succeeded this time")
+            assert_true(any(name == "information" for name, _ in calls), "A success message box should have been shown after resolving via exclude")
+
+            output_text = Document(result_holder[0].output_path).paragraphs[0].text
+            # The excluded name candidate's span [4:11) overlaps the enabled
+            # company candidate's span [0:8): "未来会議" falls inside both, so
+            # it's consumed by the company replacement regardless of the name
+            # decision being excluded. Only "細谷" (outside the company span)
+            # is actually left untouched by excluding the name candidate.
+            assert_true("細谷" in output_text, "The part of the excluded candidate outside the company span must remain untouched")
+            assert_true("株式会社未来会議" not in output_text, "The company candidate should still have been converted")
         finally:
             window.processor.cleanup()
             window.close()

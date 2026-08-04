@@ -30,6 +30,8 @@ from excel_privacy_cleaner.word_processor import (  # noqa: E402
     write_word_processing_report,
     write_word_audit_json,
     word_candidate_location_label,
+    word_finding_status,
+    word_finding_reason,
     _find_residual_text,
 )
 
@@ -491,6 +493,37 @@ def test_review_required_candidate_allows_conversion_when_enabled() -> None:
 
         output_text = Document(result.output_path).paragraphs[0].text
         assert_true("佐藤" not in output_text and "花子" not in output_text, "Approved candidate should be replaced")
+
+
+def test_excluded_review_required_candidate_allows_conversion_and_keeps_original_text() -> None:
+    with tempfile.TemporaryDirectory(prefix="word_replacement_") as tmpdir:
+        tmp = Path(tmpdir)
+        source = tmp / "fixture.docx"
+        create_low_confidence_name_fixture(source)
+
+        processor = WordPrivacyProcessor()
+        decisions = processor.scan(source)
+        assert_true(not decisions[0].enabled, "Fixture candidate should still default to disabled")
+        decisions[0].excluded = True
+
+        result = processor.convert(source, decisions, output_dir=tmp)
+
+        output_text = Document(result.output_path).paragraphs[0].text
+        assert_true("佐藤" in output_text and "花子" in output_text, "Explicitly excluded candidate must keep the original text, not be replaced")
+
+
+def test_word_finding_status_reports_excluded_state() -> None:
+    with tempfile.TemporaryDirectory(prefix="word_replacement_") as tmpdir:
+        tmp = Path(tmpdir)
+        source = tmp / "fixture.docx"
+        create_low_confidence_name_fixture(source)
+
+        processor = WordPrivacyProcessor()
+        decisions = processor.scan(source)
+        assert_true(word_finding_status(decisions[0]) == "要確認(未処理)", "Untouched review-required candidate should report as unresolved")
+        decisions[0].excluded = True
+        assert_true(word_finding_status(decisions[0]) == "確認済み(除外)", "Excluded review-required candidate should report as resolved-excluded")
+        assert_true("除外" in word_finding_reason(decisions[0]), "Reason text should mention the exclusion")
 
 
 def test_unsupported_feature_blocks_external_mode_but_warns_in_analysis_mode() -> None:

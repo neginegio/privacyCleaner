@@ -98,6 +98,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         self.scope_combo = QComboBox()
         self.pdf_redaction_combo = QComboBox()
         self.pdf_review_button = QPushButton("PDF候補確認")
+        self.word_exclude_button = QPushButton("要確認候補を除外確定(Word)")
         self.mode_note = QLabel("")
         self.history = QListWidget()
         self.table = QTableWidget(0, 8)
@@ -165,10 +166,12 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         export_csv_button.clicked.connect(self.export_findings_csv)
         clear_history_button.clicked.connect(self.clear_history)
         self.pdf_review_button.clicked.connect(self.open_pdf_review)
+        self.word_exclude_button.clicked.connect(self.mark_selected_word_excluded)
         action_row.addWidget(toggle_button)
         action_row.addWidget(all_button)
         action_row.addWidget(none_button)
         action_row.addWidget(self.pdf_review_button)
+        action_row.addWidget(self.word_exclude_button)
         action_row.addWidget(export_csv_button)
         action_row.addStretch(1)
         action_row.addWidget(clear_history_button)
@@ -529,6 +532,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             self.mode_note.setText(self.mode_note.text() + "\n" + PDF_ASSISTANCE_NOTICE)
         self.pdf_redaction_combo.setEnabled(self.is_pdf_source())
         self.update_pdf_review_button()
+        self.word_exclude_button.setEnabled(self.is_word_source())
 
     def is_pdf_source(self) -> bool:
         return self.source_path is not None and self.source_path.suffix.lower() in PDF_EXTENSIONS
@@ -539,8 +543,28 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
     def _sync_word_decisions_from_findings(self) -> None:
         for decision, finding in zip(self.word_decisions, self.findings):
             decision.enabled = finding.enabled
+            if finding.enabled:
+                decision.excluded = False
             if finding.replacement.strip():
                 decision.replacement = finding.replacement.strip()
+
+    def mark_selected_word_excluded(self) -> None:
+        if not self.is_word_source():
+            QMessageBox.information(self, "除外確定", "Wordファイルの検査後に利用できます。")
+            return
+        self.update_findings_from_table()
+        self._sync_word_decisions_from_findings()
+        rows = sorted({index.row() for index in self.table.selectedIndexes()})
+        if not rows:
+            QMessageBox.information(self, "除外確定", "対象の行を選択してください。")
+            return
+        for row in rows:
+            if row < len(self.word_decisions):
+                self.word_decisions[row].enabled = False
+                self.word_decisions[row].excluded = True
+        self.findings = [_finding_from_word_decision(decision) for decision in self.word_decisions]
+        self.refresh_table()
+        self.status_label.setText(f"{len(rows)} 件を確認済み・除外(原文維持)にしました。")
 
     def update_pdf_review_button(self) -> None:
         self.pdf_review_button.setEnabled(self.is_pdf_source() and isinstance(self.processor, PdfPrivacyProcessor) and bool(self.processor.temp_pdf))
