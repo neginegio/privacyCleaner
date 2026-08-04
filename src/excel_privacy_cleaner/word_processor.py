@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+import hmac
+import json
+import os
 import re
+import secrets
 import shutil
 import tempfile
 import zipfile
@@ -27,6 +32,7 @@ COMPANY_DESIGNATORS = ("株式会社", "有限会社", "合同会社", "医療�
 COMPANY_SUFFIX_DESIGNATORS = ("株式会社", "有限会社", "合同会社")
 WORD_NAME_CHARS = r"一-龯々〆ヵヶぁ-んァ-ヶーA-Za-z0-9"
 WORD_REVIEW_CONFIDENCE_THRESHOLD = 0.75
+WORD_AUDIT_SCHEMA = "word_audit_v1"
 
 
 class UnsupportedWordDocumentError(RuntimeError):
@@ -191,6 +197,8 @@ class WordConversionResult:
     converted_property_count: int
     skipped_hyperlink_target_count: int
     review_required_count: int
+    csv_path: Path
+    report_path: Path
 
 
 WORD_CATEGORY_ALIAS_KIND = {
@@ -404,6 +412,7 @@ class WordPrivacyProcessor:
         source_path: Path,
         decisions: list[WordReplacementDecision],
         output_dir: Path | None = None,
+        write_artifacts: bool = True,
     ) -> WordConversionResult:
         if not self.temp_docx or not self.temp_docx.exists() or self.inventory is None:
             raise RuntimeError("先に検査を実行してください。")
@@ -546,6 +555,8 @@ class WordPrivacyProcessor:
             for decision in decisions
             if decision.candidate.source != "hyperlink_target" and candidate_requires_review(decision.candidate)
         )
+        csv_path = output_path.with_name(f"{output_path.stem}_検出変換結果.csv")
+        report_path = output_path.with_name(f"{output_path.stem}_処理報告書.txt")
         result = WordConversionResult(
             output_path=output_path,
             warnings=tuple(warnings),
@@ -553,7 +564,28 @@ class WordPrivacyProcessor:
             converted_property_count=converted_property_count,
             skipped_hyperlink_target_count=skipped_hyperlink_target_count,
             review_required_count=review_required_count,
+            csv_path=csv_path,
+            report_path=report_path,
         )
+        if write_artifacts:
+            audit_path = output_path.with_name(f"{output_path.stem}_監査報告.json")
+            write_word_findings_csv(csv_path, decisions)
+            write_word_processing_report(
+                report_path,
+                source_path=source_path,
+                result=result,
+                decisions=decisions,
+                inventory=self.inventory,
+                options=self.options,
+            )
+            write_word_audit_json(
+                audit_path,
+                source_path=source_path,
+                result=result,
+                decisions=decisions,
+                inventory=self.inventory,
+                options=self.options,
+            )
         self.cleanup()
         return result
 
@@ -622,6 +654,57 @@ def _format_residual_detail(residual: dict[str, set[str]]) -> str:
     )
 
 
+def _word_candidate_location_label(candidate: WordCandidate) -> str:
+    if candidate.story_type == "document_property":
+        return f"文書プロパティ({candidate.property_name or ''})"
+
+    if candidate.story_type == "body":
+        story_label = "本文"
+    elif candidate.story_type == "header":
+        story_label = f"ヘッダー({candidate.header_footer_type or 'default'})"
+    elif candidate.story_type == "footer":
+        story_label = f"フッター({candidate.header_footer_type or 'default'})"
+    else:
+        story_label = candidate.story_type
+
+    if candidate.section_index is not None and candidate.section_index > 0:
+        story_label += f" セクション{candidate.section_index + 1}"
+
+    if candidate.container_type == "table_cell":
+        location = (
+            f"{story_label} 表{(candidate.table_index or 0) + 1} "
+            f"行{(candidate.row_index or 0) + 1}列{(candidate.cell_index or 0) + 1}"
+        )
+        if candidate.cell_paragraph_index:
+            location += f" 段落{candidate.cell_paragraph_index + 1}"
+        return location
+
+    return f"{story_label} 段落{candidate.paragraph_index + 1}"
+
+
+def _word_finding_status(decision: WordReplacementDecision) -> str:
+    candidate = decision.candidate
+    if candidate.source == "hyperlink_target":
+        return "ハイパーリンク対象外"
+    requires_review = candidate_requires_review(candidate)
+    if decision.enabled:
+        return "要確認・承認済み" if requires_review else "自動変換"
+    return "要確認(未処理)" if requires_review else "維持(手動)"
+
+
+def _word_finding_reason(decision: WordReplacementDecision) -> str:
+    candidate = decision.candidate
+    base = f"{candidate.detection_rule}(信頼度{candidate.confidence:.2f})"
+    suffix = {
+        "ハイパーリンク対象外": " / ハイパーリンクURLの置換は未対応のため対象外",
+        "要確認・承認済み": " / 要確認候補を利用者が確認のうえ承認",
+        "要確認(未処理)": " / 要確認候補が未承認のため対象外",
+        "維持(手動)": " / 利用者が対象を解除し原文を維持",
+        "自動変換": "",
+    }[_word_finding_status(decision)]
+    return base + suffix
+
+
 def _make_word_output_path(source_path: Path, output_dir: Path | None = None, options: ProcessingOptions | None = None) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     folder = output_dir if output_dir is not None else source_path.parent
@@ -631,6 +714,110 @@ def _make_word_output_path(source_path: Path, output_dir: Path | None = None, op
     if not candidate.exists():
         return candidate
     return folder / f"{source_path.stem}_{mode_label}_匿名化_{timestamp}_{datetime.now().microsecond:06d}{WORD_SUPPORTED_EXTENSION}"
+
+
+def write_word_findings_csv(path: Path, decisions: list[WordReplacementDecision]) -> None:
+    headers = ["変換", "処理状態", "位置", "種類", "検査", "検出値", "変換後", "理由"]
+    with path.open("w", encoding="utf-8-sig", newline="") as output:
+        writer = csv.writer(output)
+        writer.writerow(headers)
+        for decision in decisions:
+            candidate = decision.candidate
+            writer.writerow(
+                [
+                    "対象" if decision.enabled else "維持",
+                    _word_finding_status(decision),
+                    _word_candidate_location_label(candidate),
+                    candidate.category,
+                    candidate.detection_rule,
+                    candidate.text,
+                    decision.replacement,
+                    _word_finding_reason(decision),
+                ]
+            )
+
+
+def write_word_processing_report(
+    path: Path,
+    *,
+    source_path: Path,
+    result: WordConversionResult,
+    decisions: list[WordReplacementDecision],
+    inventory: WordStructureInventory,
+    options: ProcessingOptions,
+) -> None:
+    lines = [
+        "Word匿名化 処理報告書",
+        "",
+        f"処理モード: {options.mode_label}",
+        f"入力ファイル名: {source_path.name}",
+        f"出力ファイル名: {result.output_path.name}",
+        f"処理日時: {datetime.now():%Y-%m-%d %H:%M:%S}",
+        f"検出候補数: {len(decisions)}",
+        f"変換run数: {result.converted_run_count}",
+        f"変換文書プロパティ数: {result.converted_property_count}",
+        f"要確認件数: {result.review_required_count}",
+        f"ハイパーリンクURL対象外件数: {result.skipped_hyperlink_target_count}",
+        "",
+        "未対応領域:",
+    ]
+    if inventory.unsupported_features:
+        lines.extend(
+            f"- {feature.feature_type} ({feature.part_name}): {feature.count}件"
+            for feature in inventory.unsupported_features
+        )
+    else:
+        lines.append("- なし")
+    lines.extend(["", "警告内容:"])
+    lines.extend([f"- {warning}" for warning in result.warnings] or ["- なし"])
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_word_audit_json(
+    path: Path,
+    *,
+    source_path: Path,
+    result: WordConversionResult,
+    decisions: list[WordReplacementDecision],
+    inventory: WordStructureInventory,
+    options: ProcessingOptions,
+) -> None:
+    payload = {
+        "schema": WORD_AUDIT_SCHEMA,
+        "summary": {
+            "input_file": source_path.name,
+            "output_file": result.output_path.name,
+            "mode": options.mode_label,
+            "processed_at": datetime.now().isoformat(timespec="seconds"),
+            "source_sha256": inventory.source_sha256,
+            "candidate_count": len(decisions),
+            "converted_run_count": result.converted_run_count,
+            "converted_property_count": result.converted_property_count,
+            "review_required_count": result.review_required_count,
+            "skipped_hyperlink_target_count": result.skipped_hyperlink_target_count,
+            "unsupported_features": [
+                {"feature_type": feature.feature_type, "part_name": feature.part_name, "count": feature.count}
+                for feature in inventory.unsupported_features
+            ],
+            "warnings": list(result.warnings),
+        },
+        "findings": [
+            {
+                "category": decision.candidate.category,
+                "location": _word_candidate_location_label(decision.candidate),
+                "detection_rule": decision.candidate.detection_rule,
+                "confidence": decision.candidate.confidence,
+                "source": decision.candidate.source,
+                "status": _word_finding_status(decision),
+                "enabled": decision.enabled,
+                "replacement": decision.replacement,
+                "reason": _word_finding_reason(decision),
+                "original_hmac_sha256": _word_hmac_digest(decision.candidate.text) if decision.candidate.text else "",
+            }
+            for decision in decisions
+        ],
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def validate_docx_input(path: Path) -> None:
@@ -1431,3 +1618,38 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _hmac_digest(value: str) -> str:
+    return hmac.new(_state_hmac_key(), value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _state_hmac_key() -> bytes:
+    env_key = os.environ.get("PRIVACY_CLEANER_STATE_HMAC_KEY")
+    if env_key:
+        return env_key.encode("utf-8")
+
+    key_path = _state_hmac_key_path()
+    if key_path.exists():
+        return key_path.read_bytes()
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key = secrets.token_bytes(32)
+    key_path.write_bytes(key)
+    return key
+
+
+def _state_hmac_key_path() -> Path:
+    base = Path(os.environ.get("LOCALAPPDATA", Path.cwd()))
+    preferred = base / "ExcelPrivacyCleaner" / "state_hmac.key"
+    try:
+        preferred.parent.mkdir(parents=True, exist_ok=True)
+        probe = preferred.parent / ".write_test"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return preferred
+    except Exception:
+        return Path.cwd() / "config" / ".privacy_cleaner_state_hmac.key"
+
+
+def _word_hmac_digest(value: str) -> str:
+    return hmac.new(_state_hmac_key(), f"{WORD_AUDIT_SCHEMA}:{value}".encode("utf-8"), hashlib.sha256).hexdigest()

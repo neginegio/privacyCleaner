@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import json
 import re
 import sys
 import tempfile
@@ -24,6 +26,10 @@ from excel_privacy_cleaner.word_processor import (  # noqa: E402
     candidate_requires_review,
     default_replacement_for_candidate,
     extract_word_structure,
+    write_word_findings_csv,
+    write_word_processing_report,
+    write_word_audit_json,
+    _word_candidate_location_label,
     _find_residual_text,
 )
 
@@ -623,3 +629,143 @@ def test_residual_text_in_internal_xml_warns_in_analysis_mode_without_leaking_or
             all("株式会社未来会議" not in warning for warning in result.warnings),
             "Warnings must never contain the raw leaked original text",
         )
+
+
+def _base_location_candidate(**overrides) -> WordCandidate:
+    base = WordCandidate(
+        candidate_id="loc",
+        category="会社名",
+        story_type="body",
+        section_index=None,
+        container_type="paragraph",
+        paragraph_index=3,
+        table_index=None,
+        row_index=None,
+        cell_index=None,
+        location_id="loc",
+        char_start=0,
+        char_end=4,
+        text="x",
+        detection_rule="test",
+        confidence=0.9,
+        source="paragraph",
+    )
+    return replace(base, **overrides)
+
+
+def test_word_candidate_location_label_covers_all_container_types() -> None:
+    body_paragraph = _base_location_candidate(paragraph_index=3)
+    assert_true(_word_candidate_location_label(body_paragraph) == "本文 段落4", "Body paragraph label")
+
+    body_cell = _base_location_candidate(container_type="table_cell", table_index=0, row_index=1, cell_index=0, cell_paragraph_index=0)
+    assert_true(_word_candidate_location_label(body_cell) == "本文 表1 行2列1", "Body table cell label")
+
+    body_cell_second_paragraph = _base_location_candidate(
+        container_type="table_cell", table_index=0, row_index=1, cell_index=0, cell_paragraph_index=1
+    )
+    assert_true(_word_candidate_location_label(body_cell_second_paragraph) == "本文 表1 行2列1 段落2", "Body table cell second paragraph label")
+
+    header_paragraph = _base_location_candidate(
+        story_type="header", header_footer_type="default", section_index=0, paragraph_index=0
+    )
+    assert_true(_word_candidate_location_label(header_paragraph) == "ヘッダー(default) 段落1", "Header paragraph label")
+
+    header_cell_section2 = _base_location_candidate(
+        story_type="header", header_footer_type="default", section_index=1,
+        container_type="table_cell", table_index=0, row_index=0, cell_index=0, cell_paragraph_index=0,
+    )
+    assert_true(
+        _word_candidate_location_label(header_cell_section2) == "ヘッダー(default) セクション2 表1 行1列1",
+        "Header table cell in non-first section label",
+    )
+
+    footer_paragraph = _base_location_candidate(story_type="footer", header_footer_type="default", paragraph_index=0)
+    assert_true(_word_candidate_location_label(footer_paragraph) == "フッター(default) 段落1", "Footer paragraph label")
+
+    document_property = _base_location_candidate(
+        story_type="document_property", container_type="property", property_name="author", paragraph_index=0
+    )
+    assert_true(_word_candidate_location_label(document_property) == "文書プロパティ(author)", "Document property label")
+
+
+def test_findings_csv_has_expected_headers_and_status_rows() -> None:
+    with tempfile.TemporaryDirectory(prefix="word_replacement_") as tmpdir:
+        tmp = Path(tmpdir)
+        source = tmp / "fixture.docx"
+        create_replacement_fixture(source)
+
+        processor = WordPrivacyProcessor()
+        decisions = processor.scan(source)
+        _enable_review_required(decisions)
+        for decision in _decisions_by_text(decisions, "090-1111-2222"):
+            decision.enabled = False
+
+        result = processor.convert(source, decisions, output_dir=tmp)
+
+        with result.csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.reader(handle))
+        assert_true(rows[0] == ["変換", "処理状態", "位置", "種類", "検査", "検出値", "変換後", "理由"], "CSV header row")
+        statuses = {row[1] for row in rows[1:]}
+        for expected_status in ("自動変換", "要確認・承認済み", "維持(手動)", "ハイパーリンク対象外"):
+            assert_true(expected_status in statuses, f"Expected status missing from CSV: {expected_status}")
+
+
+def test_processing_report_contains_expected_counts_and_warnings_section() -> None:
+    with tempfile.TemporaryDirectory(prefix="word_replacement_") as tmpdir:
+        tmp = Path(tmpdir)
+        source = tmp / "fixture.docx"
+        create_high_confidence_only_fixture(source)
+        inject_unsupported_comments_part(source)
+
+        processor = WordPrivacyProcessor()
+        decisions = processor.scan(source)
+        result = processor.convert(source, decisions, output_dir=tmp)
+
+        report_text = result.report_path.read_text(encoding="utf-8")
+        assert_true(f"変換run数: {result.converted_run_count}" in report_text, "Converted run count line")
+        assert_true(f"要確認件数: {result.review_required_count}" in report_text, "Review required count line")
+        assert_true("未対応領域:" in report_text and "comments" in report_text, "Unsupported feature section")
+        assert_true("警告内容:" in report_text, "Warnings section header")
+        assert_true("未対応領域内の匿名化は保証しない" in report_text, "Required disclaimer phrase")
+
+
+def test_audit_json_is_valid_json_with_schema_and_no_raw_original_text() -> None:
+    with tempfile.TemporaryDirectory(prefix="word_replacement_") as tmpdir:
+        tmp = Path(tmpdir)
+        source = tmp / "fixture.docx"
+        create_replacement_fixture(source)
+
+        processor = WordPrivacyProcessor()
+        decisions = processor.scan(source)
+        _enable_review_required(decisions)
+        result = processor.convert(source, decisions, output_dir=tmp)
+
+        audit_path = result.output_path.with_name(f"{result.output_path.stem}_監査報告.json")
+        raw_text = audit_path.read_text(encoding="utf-8")
+        assert_true("株式会社未来会議" not in raw_text, "Audit JSON must not leak company original text")
+        assert_true("山田" not in raw_text, "Audit JSON must not leak name original text")
+
+        payload = json.loads(raw_text)
+        assert_true(payload["schema"] == "word_audit_v1", "Audit JSON schema field")
+        assert_true(len(payload["findings"]) > 0, "Audit JSON should list findings")
+        assert_true(all(finding["original_hmac_sha256"] for finding in payload["findings"]), "Every finding should carry a non-empty HMAC")
+
+        csv_text = result.csv_path.read_text(encoding="utf-8-sig")
+        assert_true("株式会社未来会議" in csv_text, "CSV should retain full-fidelity original text, unlike the audit JSON")
+
+
+def test_write_artifacts_false_suppresses_all_three_files() -> None:
+    with tempfile.TemporaryDirectory(prefix="word_replacement_") as tmpdir:
+        tmp = Path(tmpdir)
+        source = tmp / "fixture.docx"
+        create_high_confidence_only_fixture(source)
+
+        processor = WordPrivacyProcessor()
+        decisions = processor.scan(source)
+        result = processor.convert(source, decisions, output_dir=tmp, write_artifacts=False)
+
+        assert_true(result.output_path.exists(), "Output document should still be written")
+        assert_true(not result.csv_path.exists(), "CSV should not be written when write_artifacts=False")
+        assert_true(not result.report_path.exists(), "Report should not be written when write_artifacts=False")
+        audit_path = result.output_path.with_name(f"{result.output_path.stem}_監査報告.json")
+        assert_true(not audit_path.exists(), "Audit JSON should not be written when write_artifacts=False")
