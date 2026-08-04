@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .excel_processor import ExcelPrivacyProcessor, ProcessingOptions, write_findings_csv
+from .excel_processor import EXCEL_NLP_DETECTION_KIND, ExcelPrivacyProcessor, ProcessingOptions, write_findings_csv
 from .models import Finding
 from .pdf_processor import (
     PDF_ASSISTANCE_NOTICE,
@@ -71,6 +71,7 @@ def _finding_from_word_decision(decision: WordReplacementDecision) -> Finding:
         reason=word_finding_reason(decision),
         start=candidate.char_start,
         end=candidate.char_end,
+        excluded=decision.excluded,
     )
 
 
@@ -457,6 +458,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         self.table.blockSignals(True)
         self.table.setRowCount(0)
         is_word = self.is_word_source()
+        is_excel = isinstance(self.processor, ExcelPrivacyProcessor)
         # Word candidate categories are fixed by detection and can't be edited
         # after the fact (WordCandidate is immutable), unlike Excel/PDF's
         # entity_type, so column 4 stays read-only for Word rows.
@@ -468,13 +470,17 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             enabled.setCheckState(Qt.Checked if finding.enabled else Qt.Unchecked)
             self.table.setItem(row, 0, enabled)
 
-            # "変換しない" (reviewed-and-excluded) is a Word-only concept --
-            # Excel/PDF have no third state, so the checkbox stays absent
-            # (not just unchecked) for their rows.
+            # "変換しない" (reviewed-and-excluded) is a Word/Excel concept --
+            # PDF has its own separate page-by-page review dialog and no
+            # third state here, so the checkbox stays absent (not just
+            # unchecked) for its rows.
             excluded = QTableWidgetItem()
-            if is_word:
+            if is_word or is_excel:
                 excluded.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                is_excluded = row < len(self.word_decisions) and self.word_decisions[row].excluded
+                if is_word:
+                    is_excluded = row < len(self.word_decisions) and self.word_decisions[row].excluded
+                else:
+                    is_excluded = finding.excluded
                 excluded.setCheckState(Qt.Checked if is_excluded else Qt.Unchecked)
             else:
                 excluded.setFlags(Qt.ItemIsSelectable)
@@ -520,6 +526,33 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 self.table.blockSignals(False)
         if self.is_word_source():
             self._refresh_word_row_status(row)
+        elif isinstance(self.processor, ExcelPrivacyProcessor):
+            self._refresh_excel_row_status(row)
+
+    def _refresh_excel_row_status(self, row: int) -> None:
+        if row >= len(self.findings):
+            return
+        enabled_item = self.table.item(row, 0)
+        excluded_item = self.table.item(row, 1)
+        finding = self.findings[row]
+        finding.enabled = enabled_item is not None and enabled_item.checkState() == Qt.Checked
+        finding.excluded = bool(
+            excluded_item is not None and excluded_item.checkState() == Qt.Checked and not finding.enabled
+        )
+        if finding.detection_kind not in {"確認候補", EXCEL_NLP_DETECTION_KIND}:
+            return
+        base_reason = finding.reason.split(" / 要確認候補を利用者が確認のうえ")[0]
+        if finding.excluded:
+            finding.reason = base_reason + " / 要確認候補を利用者が確認のうえ除外(原文を維持)"
+        elif finding.enabled:
+            finding.reason = base_reason + " / 要確認候補を利用者が確認のうえ承認"
+        else:
+            finding.reason = base_reason
+        self.table.blockSignals(True)
+        reason_item = self.table.item(row, 8)
+        if reason_item is not None:
+            reason_item.setText(finding.reason)
+        self.table.blockSignals(False)
 
     def _refresh_word_row_status(self, row: int) -> None:
         if row >= len(self.word_decisions):

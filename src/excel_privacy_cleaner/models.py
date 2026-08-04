@@ -15,6 +15,12 @@ class Finding:
     reason: str
     start: int | None = None
     end: int | None = None
+    # True only when a reviewer looked at a review-required candidate and
+    # explicitly decided to keep the original text (not convert it), as
+    # distinct from simply never having been reviewed yet. Word tracks this
+    # on WordReplacementDecision instead and does not populate this field
+    # for its own bookkeeping; Excel uses this field directly.
+    excluded: bool = False
 
     @property
     def dedupe_key(self) -> tuple[str, str, str, str, str]:
