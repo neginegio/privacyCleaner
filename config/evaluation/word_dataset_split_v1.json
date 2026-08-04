@@ -19,7 +19,12 @@
   },
   "holdout": {
     "reserved": true,
-    "note": "Do not inspect or use holdout data during implementation."
+    "note": "Do not inspect or use holdout data during implementation.",
+    "conversion_residual_check_procedure": {
+      "script": "tools/evaluate_word_holdout.py",
+      "flag": "--check-conversion-residual",
+      "status": "prepared_not_executed"
+    }
   },
   "leakage_guard": "Candidate generation code must not read this file."
 }

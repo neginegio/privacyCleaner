@@ -1,0 +1,13 @@
+﻿scope,name,metric,value
+reproduction_check,all,matches_phase2_1_frozen_metrics,True
+conversion_metrics,all,matched_ground_truth_count,24
+conversion_metrics,all,converted_matched_candidate_count,24
+conversion_metrics,all,converted_run_count,22
+conversion_metrics,all,converted_property_count,0
+conversion_metrics,all,review_required_count,7
+conversion_metrics,all,skipped_hyperlink_target_count,0
+conversion_metrics,all,warning_count,1
+residual_check,all,convert_internal_residual_warning,False
+residual_check,all,matched_truth_readable_text_residual_count,0
+residual_check,all,matched_truth_internal_xml_residual_parts,
+residual_check,all,verdict,pass

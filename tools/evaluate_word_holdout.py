@@ -4,6 +4,7 @@ import argparse
 import csv
 import hashlib
 import json
+import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,11 @@ def main() -> int:
     parser.add_argument("--private-out-dir", required=True, type=Path)
     parser.add_argument("--docs-out-dir", default=Path("docs/evaluation_baselines"), type=Path)
     parser.add_argument("--public-stem", required=True)
+    parser.add_argument(
+        "--check-conversion-residual",
+        action="store_true",
+        help="Also run scan()/convert() on --docx and check for post-conversion residual text (design doc step 10 dimension).",
+    )
     args = parser.parse_args()
 
     word_sha = sha256(args.docx)
@@ -45,6 +51,37 @@ def main() -> int:
     missed_cause_counts = dict(sorted(Counter(detail["cause_category"] for detail in missed_details).items()))
     fp_cause_counts = dict(sorted(Counter(detail["cause_category"] for detail in fp_details).items()))
 
+    conversion_residual_private: dict[str, object] | None = None
+    conversion_residual_public: dict[str, object] = {
+        "conversion_residual_check_performed": False,
+        "conversion_residual_verdict": "not_run",
+        "converted_matched_candidate_count": 0,
+    }
+    if args.check_conversion_residual:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from word_conversion_evaluation import run_conversion_and_check_residual  # noqa: E402 (deliberately lazy, see module docstring note in the plan)
+
+        truth_keys = {
+            (str(truth["location_id"]), normalize_category(str(truth["category"])), int(truth["char_start"]), int(truth["char_end"]))
+            for truth in truths
+        }
+        conversion_check_dir = args.private_out_dir / "conversion_check"
+        conversion_check_dir.mkdir(parents=True, exist_ok=True)
+        report = run_conversion_and_check_residual(args.docx, truth_keys, conversion_check_dir)
+        conversion_residual_private = {
+            "verdict": report.verdict,
+            "converted_matched_candidate_count": report.converted_matched_candidate_count,
+            "convert_internal_residual_warning": report.convert_internal_residual_warning,
+            "matched_truth_readable_text_residual_count": len(report.matched_truth_readable_text_residual),
+            "matched_truth_internal_xml_residual_parts": sorted(report.matched_truth_internal_xml_residual),
+            "warnings": list(report.conversion_result.warnings),
+        }
+        conversion_residual_public = {
+            "conversion_residual_check_performed": True,
+            "conversion_residual_verdict": report.verdict,
+            "converted_matched_candidate_count": report.converted_matched_candidate_count,
+        }
+
     args.private_out_dir.mkdir(parents=True, exist_ok=True)
     private_prefix = args.public_stem.replace("Word匿名化検出_", "")
     private_details_path = args.private_out_dir / f"{private_prefix}_evaluation_error_details_private.csv"
@@ -61,6 +98,7 @@ def main() -> int:
                 "category_results": category_results,
                 "missed_cause_counts": missed_cause_counts,
                 "fp_cause_counts": fp_cause_counts,
+                "conversion_residual_check": conversion_residual_private,
             },
             ensure_ascii=False,
             indent=2,
@@ -98,6 +136,7 @@ def main() -> int:
         "evaluation_interpretation": evaluation_interpretation(args.holdout_id, metrics, category_results, missed_cause_counts),
         "privacy_note": "This public record intentionally excludes original text, candidate text, ground truth text, and detailed spans containing real information.",
         "private_error_details_sha256": sha256(private_details_path),
+        **conversion_residual_public,
     }
     args.docs_out_dir.mkdir(parents=True, exist_ok=True)
     write_public_records(args.docs_out_dir, args.public_stem, public_payload)
@@ -387,6 +426,12 @@ def write_public_md(path: Path, payload: dict[str, object]) -> None:
             lines.append(f"| {cause} | `{count}` |")
     else:
         lines.append("| なし | `0` |")
+    lines.extend(["", "## Conversion Residual Check(置換後残存なし)", ""])
+    if payload.get("conversion_residual_check_performed"):
+        lines.append(f"- verdict: `{payload['conversion_residual_verdict']}`")
+        lines.append(f"- converted_matched_candidate_count: `{payload['converted_matched_candidate_count']}`")
+    else:
+        lines.append("- 未実施")
     lines.extend(
         [
             "",
