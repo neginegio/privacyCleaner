@@ -187,6 +187,12 @@ class WordReplacementDecision:
     candidate: WordCandidate
     enabled: bool = True
     replacement: str = ""
+    # True only when a reviewer looked at a review-required candidate and
+    # explicitly decided to keep the original text (not convert it), as
+    # distinct from simply never having been reviewed yet. Only this state
+    # (not a bare `enabled=False`) satisfies the review-required guard in
+    # convert() without enabling the candidate.
+    excluded: bool = False
 
 
 @dataclass(frozen=True)
@@ -441,6 +447,7 @@ class WordPrivacyProcessor:
             decision
             for decision in decisions
             if not decision.enabled
+            and not decision.excluded
             and decision.candidate.source != "hyperlink_target"
             and candidate_requires_review(decision.candidate)
         ]
@@ -472,7 +479,7 @@ class WordPrivacyProcessor:
             paragraph = paragraph_by_location.get(candidate.location_id)
             if paragraph is None or paragraph.text[candidate.char_start : candidate.char_end] != candidate.text:
                 raise RuntimeError(
-                    f"構造が変化しました。再スキャンしてください。対象候補: {candidate.category} {candidate.text!r}"
+                    f"構造が変化しました。再スキャンしてください。対象候補: {candidate.category} 「{candidate.text}」"
                 )
 
         decisions_by_location: dict[str, list[WordReplacementDecision]] = {}
@@ -484,8 +491,8 @@ class WordPrivacyProcessor:
                 if previous.candidate.char_end > current.candidate.char_start:
                     raise RuntimeError(
                         "検出候補の範囲が重複しています: "
-                        f"{previous.candidate.category} {previous.candidate.text!r} / "
-                        f"{current.candidate.category} {current.candidate.text!r}"
+                        f"{previous.candidate.category} 「{previous.candidate.text}」 / "
+                        f"{current.candidate.category} 「{current.candidate.text}」"
                     )
 
         property_decisions = [decision for decision in enabled_decisions if decision.candidate.source == "document_property"]
@@ -689,6 +696,8 @@ def word_finding_status(decision: WordReplacementDecision) -> str:
     requires_review = candidate_requires_review(candidate)
     if decision.enabled:
         return "要確認・承認済み" if requires_review else "自動変換"
+    if decision.excluded:
+        return "確認済み(除外)"
     return "要確認(未処理)" if requires_review else "維持(手動)"
 
 
@@ -699,6 +708,7 @@ def word_finding_reason(decision: WordReplacementDecision) -> str:
         "ハイパーリンク対象外": " / ハイパーリンクURLの置換は未対応のため対象外",
         "要確認・承認済み": " / 要確認候補を利用者が確認のうえ承認",
         "要確認(未処理)": " / 要確認候補が未承認のため対象外",
+        "確認済み(除外)": " / 要確認候補を利用者が確認のうえ除外(原文を維持)",
         "維持(手動)": " / 利用者が対象を解除し原文を維持",
         "自動変換": "",
     }[word_finding_status(decision)]
