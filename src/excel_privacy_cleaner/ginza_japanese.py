@@ -85,7 +85,16 @@ class GinzaEntityDetector:
                 category = "氏名"
             else:
                 continue
-            results.append(
-                GinzaNlpResult(start=ent.start_char, end=ent.end_char, category=category, raw_label=ent.label_)
-            )
+            start, end = _trim_honorific_suffix(text, ent.start_char, ent.end_char)
+            results.append(GinzaNlpResult(start=start, end=end, category=category, raw_label=ent.label_))
         return results
+
+
+def _trim_honorific_suffix(text: str, start: int, end: int) -> tuple[int, int]:
+    # GiNZA sometimes includes a trailing honorific in the entity span (e.g.
+    # "アルプススチール様"); strip it so the candidate matches the bare name.
+    value = text[start:end]
+    for suffix in ("様", "さん", "殿", "氏"):
+        if value.endswith(suffix) and len(value) > len(suffix):
+            return start, end - len(suffix)
+    return start, end

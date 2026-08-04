@@ -15,6 +15,7 @@ from openpyxl import load_workbook
 from openpyxl.utils.cell import range_boundaries
 from openpyxl.worksheet.worksheet import Worksheet
 
+from .ginza_japanese import GinzaEntityDetector, WORD_NLP_CONFIDENCE, WORD_NLP_DETECTION_RULE
 from .models import Finding
 from .presidio_japanese import (
     normalize_text,
@@ -23,6 +24,12 @@ from .presidio_japanese import (
     entity_label,
     normalize_alias_key,
 )
+
+
+EXCEL_NLP_DETECTION_KIND = "AI候補"
+# GiNZA's category labels ("会社名"/"氏名") map onto the same alias kinds the
+# rest of this module already uses for company/person replacements.
+EXCEL_NLP_CATEGORY_TO_ALIAS_KIND = {"会社名": "company", "氏名": "name"}
 
 
 @dataclass(frozen=True)
@@ -249,6 +256,7 @@ class ExcelPrivacyProcessor:
         keep_vba = workbook_path.suffix.lower() == ".xlsm"
         workbook = load_workbook(self.temp_workbook, keep_vba=keep_vba)
         value_workbook = load_workbook(self.temp_workbook, keep_vba=keep_vba, data_only=True)
+        ginza_detector = GinzaEntityDetector()
         findings: list[Finding] = []
         seen: set[tuple[str, str, str, str, str]] = set()
 
@@ -339,6 +347,7 @@ class ExcelPrivacyProcessor:
                     for finding in literal_findings:
                         self._append_finding(findings, seen, finding)
 
+                    presidio_findings: list[Finding] = []
                     for result in self.detector.analyze(text):
                         if any(
                             finding.start is not None
@@ -354,6 +363,46 @@ class ExcelPrivacyProcessor:
                             continue
                         replacement = replacement_for(kind, original, self.alias_book, self.options)
                         enabled = self._default_enabled(True, kind, "自由記述", cell)
+                        presidio_finding = Finding(
+                            enabled=enabled,
+                            sheet=sheet.title,
+                            cell=cell.coordinate,
+                            entity_type=entity_label(result.entity_type),
+                            detection_kind="自由記述",
+                            original=original,
+                            replacement=replacement,
+                            reason="Presidio カスタム Recognizer" + (self._preserve_reason(kind, cell) if not enabled else ""),
+                            start=result.start,
+                            end=result.end,
+                        )
+                        presidio_findings.append(presidio_finding)
+                        self._append_finding(findings, seen, presidio_finding)
+
+                    # GiNZA catches organization/person mentions the pattern
+                    # rules and Presidio structurally cannot see (e.g. a
+                    # company's short form used without its legal-entity
+                    # suffix). It exposes no calibrated per-candidate
+                    # confidence score and its label set is far coarser than
+                    # this app's category taxonomy, so results always
+                    # default to review-required rather than auto-converting
+                    # -- see EXCEL_NLP_DETECTION_KIND's dedicated branch in
+                    # _default_enabled().
+                    already_covered = literal_findings + presidio_findings
+                    for nlp_result in ginza_detector.analyze(text):
+                        if any(
+                            finding.start is not None
+                            and finding.end is not None
+                            and nlp_result.start < finding.end
+                            and finding.start < nlp_result.end
+                            for finding in already_covered
+                        ):
+                            continue
+                        original = text[nlp_result.start : nlp_result.end].strip()
+                        if len(original) < 2:
+                            continue
+                        kind = EXCEL_NLP_CATEGORY_TO_ALIAS_KIND.get(nlp_result.category, "text")
+                        replacement = replacement_for(kind, original, self.alias_book, self.options)
+                        enabled = self._default_enabled(False, kind, EXCEL_NLP_DETECTION_KIND, cell)
                         self._append_finding(
                             findings,
                             seen,
@@ -361,13 +410,13 @@ class ExcelPrivacyProcessor:
                                 enabled=enabled,
                                 sheet=sheet.title,
                                 cell=cell.coordinate,
-                                entity_type=entity_label(result.entity_type),
-                                detection_kind="自由記述",
+                                entity_type=nlp_result.category,
+                                detection_kind=EXCEL_NLP_DETECTION_KIND,
                                 original=original,
                                 replacement=replacement,
-                                reason="Presidio カスタム Recognizer" + (self._preserve_reason(kind, cell) if not enabled else ""),
-                                start=result.start,
-                                end=result.end,
+                                reason=f"{WORD_NLP_DETECTION_RULE}(信頼度{WORD_NLP_CONFIDENCE:.2f})",
+                                start=nlp_result.start,
+                                end=nlp_result.end,
                             ),
                         )
 
@@ -382,6 +431,12 @@ class ExcelPrivacyProcessor:
         return len({(finding.sheet, finding.cell) for finding in findings if finding.enabled} & self.formula_cells)
 
     def _default_enabled(self, base_enabled: bool, kind: str, detection_kind: str, cell) -> bool:
+        if detection_kind == EXCEL_NLP_DETECTION_KIND:
+            # Unlike "確認候補" (a known ambiguous-but-specific pattern that
+            # analysis mode auto-approves below), an AI-sourced candidate has
+            # no calibrated confidence and must always be reviewed by a
+            # human before conversion, in every mode.
+            return False
         if not base_enabled and self.options.is_analysis and detection_kind == "確認候補":
             return True
         if not base_enabled:
@@ -432,7 +487,11 @@ class ExcelPrivacyProcessor:
             raise RuntimeError("先に検査を実行してください。")
 
         active_options = options or self.options
-        blocked_candidates = [finding for finding in findings if not finding.enabled and finding.detection_kind == "確認候補"]
+        blocked_candidates = [
+            finding
+            for finding in findings
+            if not finding.enabled and not finding.excluded and finding.detection_kind in {"確認候補", EXCEL_NLP_DETECTION_KIND}
+        ]
         if blocked_candidates:
             preview = "、".join(f"{finding.sheet}!{finding.cell}" for finding in blocked_candidates[:8])
             raise RuntimeError(
@@ -478,7 +537,7 @@ class ExcelPrivacyProcessor:
 
             replaced_ranges: list[range] = []
             for finding in sorted(
-                [item for item in cell_findings if item.detection_kind in {"自由記述", "辞書一致", "確認候補"}],
+                [item for item in cell_findings if item.detection_kind in {"自由記述", "辞書一致", "確認候補", EXCEL_NLP_DETECTION_KIND}],
                 key=lambda item: item.start if item.start is not None else 0,
                 reverse=True,
             ):
@@ -520,7 +579,7 @@ class ExcelPrivacyProcessor:
         csv_path = output_path.with_name(f"{output_path.stem}_検出変換結果.csv")
         report_path = output_path.with_name(f"{output_path.stem}_処理報告書.txt")
         converted_count = sum(1 for finding in findings if finding.enabled)
-        review_count = sum(1 for finding in findings if finding.detection_kind == "確認候補")
+        review_count = sum(1 for finding in findings if finding.detection_kind in {"確認候補", EXCEL_NLP_DETECTION_KIND})
         result = ConversionResult(
             excel_path=output_path,
             csv_path=csv_path,
@@ -871,6 +930,16 @@ class ExcelPrivacyProcessor:
         return folder / f"{source_path.stem}_{mode_label}_匿名化_{timestamp}_{datetime.now().microsecond:06d}{suffix}"
 
 
+def excel_finding_status(finding: Finding) -> str:
+    if finding.excluded:
+        return "確認済み(除外)"
+    if finding.detection_kind == "確認候補":
+        return "確認候補"
+    if finding.detection_kind == EXCEL_NLP_DETECTION_KIND:
+        return "AI候補"
+    return "自動変換" if finding.enabled else "維持"
+
+
 def write_findings_csv(path: Path, findings: list[Finding]) -> None:
     headers = [
         "変換",
@@ -887,7 +956,7 @@ def write_findings_csv(path: Path, findings: list[Finding]) -> None:
         writer = csv.writer(output)
         writer.writerow(headers)
         for finding in findings:
-            status = "確認候補" if finding.detection_kind == "確認候補" else ("自動変換" if finding.enabled else "維持")
+            status = excel_finding_status(finding)
             writer.writerow(
                 [
                     "対象" if finding.enabled else "維持",
