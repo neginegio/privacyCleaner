@@ -6,9 +6,9 @@ Phase 2.1 frozen候補と、独立作成したHoldout002 ground truthを初め�
 
 ## 固定対象
 
-- Phase 2.1 commit: `ca7b01e+ginza_ner`
+- Phase 2.1 commit: `ca7b01e+ginza_ner+label_filters`
 - Word SHA-256: `074ad48cb816f6e93f506fbd3c8b0e776320954aa439bbd35633c4f0d5311b14`
-- candidate SHA-256: `56aa29a75539ec674cf3982d2f8323a205a20f3c3352884e5a1fc4680c24fd16`
+- candidate SHA-256: `797e8c10c1b15706d2c1bfc462986bdf2e35c3ae74bebdcdfbf8d700a0184630`
 - ground truth SHA-256: `689f2e30128857d2e373c616f5c0505cc382431654f0ed220f1bc902cb1630d4`
 
 ## 評価上の解釈
@@ -28,13 +28,13 @@ Phase 2.1 frozen候補と、独立作成したHoldout002 ground truthを初め�
 | 指標 | 値 |
 |---|---:|
 | ground_truth_count | `9` |
-| candidate_count | `23` |
+| candidate_count | `17` |
 | matched_ground_truth_count | `5` |
 | missed_ground_truth_count | `4` |
 | true_positive_candidate_count | `5` |
-| false_positive_candidate_count | `18` |
+| false_positive_candidate_count | `12` |
 | recall | `0.556` |
-| candidate_precision | `0.217` |
+| candidate_precision | `0.294` |
 | exact_span_match_count | `5` |
 
 ## Category Results
@@ -42,9 +42,9 @@ Phase 2.1 frozen候補と、独立作成したHoldout002 ground truthを初め�
 | カテゴリ | GT | Candidates | Matched | Missed | TP Candidate | FP Candidate |
 |---|---:|---:|---:|---:|---:|---:|
 | メールアドレス | `1` | `1` | `1` | `0` | `1` | `0` |
-| 会社名 | `1` | `7` | `0` | `1` | `0` | `7` |
+| 会社名 | `1` | `8` | `0` | `1` | `0` | `8` |
 | 住所 | `1` | `1` | `0` | `1` | `0` | `1` |
-| 氏名 | `3` | `12` | `2` | `1` | `2` | `10` |
+| 氏名 | `3` | `5` | `2` | `1` | `2` | `3` |
 | 銀行名 | `1` | `0` | `0` | `1` | `0` | `0` |
 | 電話番号 | `2` | `2` | `2` | `0` | `2` | `0` |
 
@@ -62,7 +62,7 @@ Phase 2.1 frozen候補と、独立作成したHoldout002 ground truthを初め�
 | 原因カテゴリ | 件数 |
 |---|---:|
 | span過大 | `3` |
-| 一般語誤検出 | `15` |
+| 一般語誤検出 | `9` |
 
 ## Conversion Residual Check(置換後残存なし)
 

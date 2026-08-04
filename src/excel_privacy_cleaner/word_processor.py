@@ -1327,8 +1327,42 @@ def _regex_candidate_results(text: str) -> list[tuple[int, int, str, str, float,
             value = text[start:end]
             if _is_generic_word_false_positive(category, value):
                 continue
+            if rule == "word_japanese_full_name_space" and (
+                _is_form_label_before_colon(text, end) or _is_article_number_fragment(text, start)
+            ):
+                continue
             results.append((start, end, category, rule, confidence, category))
     return results
+
+
+def _is_form_label_before_colon(text: str, end: int) -> bool:
+    # Japanese forms/contracts routinely pad a label (氏名, 住所, 電話, ...)
+    # with repeated full-width spaces for visual column alignment, which
+    # happens to match the same "kanji + space + kanji" shape as a real
+    # name. A label is reliably followed by a colon once the padding runs
+    # out; a real name essentially never is.
+    limit = min(len(text), end + 15)
+    index = end
+    while index < limit:
+        char = text[index]
+        if char in "：:":
+            return True
+        if char in " \t　" or "一" <= char <= "龯" or char in "々〆ヵヶ":
+            index += 1
+            continue
+        return False
+    return False
+
+
+_ARTICLE_NUMBER_PREFIX_RE = re.compile(r"第[0-9０-９]+$")
+
+
+def _is_article_number_fragment(text: str, start: int) -> bool:
+    # "第１条" (Article 1) loses its leading "第１" to the kanji-only
+    # candidate regex, leaving a bare "条" that then pairs with the
+    # article's title (e.g. "条　委託業務") as if it were a name.
+    prefix = text[max(0, start - 6) : start]
+    return bool(_ARTICLE_NUMBER_PREFIX_RE.search(prefix))
 
 
 def _company_designator_results(text: str) -> list[tuple[int, int, str, str, float, str]]:
