@@ -28,6 +28,11 @@ GINZA_ORGANIZATION_LABELS = {
 }
 GINZA_PERSON_LABELS = {"Person"}
 
+# GiNZA's category labels ("会社名"/"氏名") map onto the same alias kinds the
+# Excel/PDF/Word replacement machinery already uses for company/person
+# replacements (see ALIAS_PREFIXES in excel_processor.py).
+GINZA_CATEGORY_TO_ALIAS_KIND = {"会社名": "company", "氏名": "name"}
+
 # GiNZA's standard NER pipeline does not expose a calibrated per-entity
 # confidence score. Every candidate from this source is given this fixed,
 # below-review-threshold confidence so it always lands in the "要確認"

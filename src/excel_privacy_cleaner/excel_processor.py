@@ -15,7 +15,12 @@ from openpyxl import load_workbook
 from openpyxl.utils.cell import range_boundaries
 from openpyxl.worksheet.worksheet import Worksheet
 
-from .ginza_japanese import GinzaEntityDetector, WORD_NLP_CONFIDENCE, WORD_NLP_DETECTION_RULE
+from .ginza_japanese import (
+    GINZA_CATEGORY_TO_ALIAS_KIND,
+    GinzaEntityDetector,
+    WORD_NLP_CONFIDENCE,
+    WORD_NLP_DETECTION_RULE,
+)
 from .models import Finding
 from .presidio_japanese import (
     normalize_text,
@@ -27,9 +32,6 @@ from .presidio_japanese import (
 
 
 EXCEL_NLP_DETECTION_KIND = "AI候補"
-# GiNZA's category labels ("会社名"/"氏名") map onto the same alias kinds the
-# rest of this module already uses for company/person replacements.
-EXCEL_NLP_CATEGORY_TO_ALIAS_KIND = {"会社名": "company", "氏名": "name"}
 
 
 @dataclass(frozen=True)
@@ -400,7 +402,7 @@ class ExcelPrivacyProcessor:
                         original = text[nlp_result.start : nlp_result.end].strip()
                         if len(original) < 2:
                             continue
-                        kind = EXCEL_NLP_CATEGORY_TO_ALIAS_KIND.get(nlp_result.category, "text")
+                        kind = GINZA_CATEGORY_TO_ALIAS_KIND.get(nlp_result.category, "text")
                         replacement = replacement_for(kind, original, self.alias_book, self.options)
                         enabled = self._default_enabled(False, kind, EXCEL_NLP_DETECTION_KIND, cell)
                         self._append_finding(
