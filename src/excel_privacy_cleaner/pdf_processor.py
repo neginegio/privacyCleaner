@@ -20,6 +20,12 @@ except ImportError:  # pragma: no cover - exercised only when dependency is miss
     fitz = None  # type: ignore[assignment]
 
 from .excel_processor import AliasBook, ProcessingOptions, replacement_for
+from .ginza_japanese import (
+    GINZA_CATEGORY_TO_ALIAS_KIND,
+    GinzaEntityDetector,
+    WORD_NLP_CONFIDENCE,
+    WORD_NLP_DETECTION_RULE,
+)
 from .models import Finding
 from .pdf_context_rules import context_candidates_for_page
 from .pdf_ocr_support import (
@@ -184,6 +190,7 @@ class PdfPrivacyProcessor:
         findings: list[Finding] = []
         seen: set[tuple[str, str, str, str, str]] = set()
         known_family_names: dict[str, str] = {}
+        ginza_detector = GinzaEntityDetector()
 
         doc = fitz.open(self.temp_pdf)
         try:
@@ -280,6 +287,45 @@ class PdfPrivacyProcessor:
                             )
                             self._append_finding(findings, seen, finding)
                             occupied.append(match_range)
+
+                    # GiNZA catches organization/person mentions the pattern
+                    # rules and Presidio structurally cannot see (e.g. a
+                    # company's short form used without its legal-entity
+                    # suffix). Only wired for text-layer pages -- the OCR
+                    # pipeline works over a separately normalized string with
+                    # its own char->rect mapping, which GiNZA's raw text
+                    # offsets don't line up with. Results reuse
+                    # CANDIDATE_REVIEW (not the "確認候補" literal the
+                    # honorific-surname pass above uses) so the review
+                    # dialog's approve/reject action -- which only recognizes
+                    # CANDIDATE_REVIEW/USER_APPROVED/USER_REJECTED -- can
+                    # actually resolve them, the same as every other
+                    # review-required OCR candidate.
+                    for nlp_result in ginza_detector.analyze(span_text):
+                        match_range = range(nlp_result.start, nlp_result.end)
+                        if any(match_range.start < item.stop and item.start < match_range.stop for item in occupied):
+                            continue
+                        original = span_text[nlp_result.start : nlp_result.end].strip()
+                        if len(original) < 2:
+                            continue
+                        kind = GINZA_CATEGORY_TO_ALIAS_KIND.get(nlp_result.category, "text")
+                        replacement = replacement_for(kind, original, self.alias_book, self.options)
+                        finding = self._make_finding(
+                            enabled=False,
+                            page_label=page_label,
+                            page_index=page_index,
+                            bbox=bbox,
+                            span_text=span_text,
+                            start=nlp_result.start,
+                            end=nlp_result.end,
+                            entity_type=nlp_result.category,
+                            detection_kind=CANDIDATE_REVIEW,
+                            original=original,
+                            replacement=replacement,
+                            reason=f"{WORD_NLP_DETECTION_RULE}(信頼度{WORD_NLP_CONFIDENCE:.2f})",
+                        )
+                        self._append_finding(findings, seen, finding)
+                        occupied.append(match_range)
         finally:
             doc.close()
         return findings

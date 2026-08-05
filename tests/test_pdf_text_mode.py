@@ -9,6 +9,7 @@ import fitz
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from excel_privacy_cleaner.excel_processor import ProcessingOptions  # noqa: E402
+from excel_privacy_cleaner.pdf_ocr_support import CANDIDATE_REVIEW, USER_REJECTED  # noqa: E402
 from excel_privacy_cleaner.pdf_processor import PDF_ASSISTANCE_NOTICE, PdfPrivacyProcessor  # noqa: E402
 
 
@@ -44,6 +45,16 @@ def main() -> int:
 
         name_replacements = {finding.replacement for finding in findings if finding.original == "Yamada Taro"}
         assert_true(len(name_replacements) == 1, "Same person should receive the same pseudonym")
+
+        # GiNZA (run on this English-labeled fixture) misreads the "Phone"/
+        # "Email" field labels as organization names -- reject them the way
+        # the review dialog's "解除" action would, rather than approving
+        # obvious false positives just to unblock the test.
+        for finding in findings:
+            if finding.detection_kind == CANDIDATE_REVIEW:
+                finding.enabled = False
+                finding.detection_kind = USER_REJECTED
+
         processor.mark_page_reviewed_with_redactions(0)
         processor.mark_page_reviewed_with_redactions(1)
 
