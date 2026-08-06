@@ -9,11 +9,15 @@ dist/
 *_検出結果_20*.csv
 *_検出変換結果.csv
 *_処理報告書.txt
+*_ページ品質.csv
+*_監査報告.json
+*.pdf_review_state.json
 config/.privacy_cleaner_state_hmac.key
 ocr_quality_outputs/
 pdf_ocr_test_outputs/
 word_holdout_private/
 *.pdf
 *.log
+*.lnk
 ocr_check_result.txt
 .pytest_cache/

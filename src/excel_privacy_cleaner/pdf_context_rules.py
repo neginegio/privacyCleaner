@@ -937,6 +937,34 @@ def _section_value_rect(
     )
 
 
+_LIGATURE_KANJI_RANGE = "一-龠々"
+_LIGATURE_KANA_RANGE = "ァ-ヶーぁ-んー"
+_LIGATURE_PREFIX_RE = re.compile(rf"^[{_LIGATURE_KANJI_RANGE}][{_LIGATURE_KANA_RANGE}]{{2,}}")
+_LIGATURE_SUFFIX_RE = re.compile(rf"[{_LIGATURE_KANA_RANGE}]{{2,}}[{_LIGATURE_KANJI_RANGE}]$")
+_LIGATURE_STRIP_CHARS = "・-*•. 　"
+
+LIGATURE_OCR_NOTE = (
+    "先頭または末尾の1文字はOCRが「㈱」等の合字を別の漢字に誤認識した可能性があります。原本で確認してください"
+)
+
+
+def _possible_ligature_note(original: str, entity_type: str) -> str:
+    """会社名候補で、単独の漢字1文字がカタカナ/ひらがな連続に隣接している場合に注記を付ける。
+
+    Tesseract は「㈱」のような囲み文字を安定して読めず、DPIを変えても
+    別の漢字(師/梯/常/犀/帳など)にランダムに化けるため、テキストを推測補正
+    せずに「要確認」の理由欄で注意喚起するだけに留める。
+    """
+    if entity_type != "会社名":
+        return ""
+    stripped = original.strip(_LIGATURE_STRIP_CHARS)
+    if not stripped:
+        return ""
+    if _LIGATURE_PREFIX_RE.search(stripped) or _LIGATURE_SUFFIX_RE.search(stripped):
+        return LIGATURE_OCR_NOTE
+    return ""
+
+
 def _join_info(words: list[_WordBox], reason: str) -> str:
     blocks = {word.block for word in words}
     lines = {(word.block, word.line) for word in words}
@@ -970,6 +998,7 @@ def _candidate_from_words(
     rect = _safe_rect(rect, page_rect)
     if rect[2] - rect[0] <= 1 or rect[3] - rect[1] <= 1:
         return None
+    ligature_note = _possible_ligature_note(original, entity_type)
     return OcrCandidate(
         original=original,
         normalized=normalized,
@@ -977,7 +1006,9 @@ def _candidate_from_words(
         status=CANDIDATE_REVIEW,
         replacement=replacement,
         rect=rect,
-        reason=f"{rule_name}: {reason}。参照見出し/列={referenced_header}。信頼度={confidence}" + (f"。{join_info}" if join_info else ""),
+        reason=f"{rule_name}: {reason}。参照見出し/列={referenced_header}。信頼度={confidence}"
+        + (f"。{join_info}" if join_info else "")
+        + (f"。{ligature_note}" if ligature_note else ""),
     )
 
 

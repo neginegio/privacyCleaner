@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QCloseEvent, QIcon
+from PySide6.QtGui import QBrush, QCloseEvent, QColor, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -27,11 +27,19 @@ from PySide6.QtWidgets import (
 
 from .excel_processor import EXCEL_NLP_DETECTION_KIND, ExcelPrivacyProcessor, ProcessingOptions, write_findings_csv
 from .models import Finding
+from .pdf_ocr_support import (
+    CANDIDATE_AUTO,
+    CANDIDATE_MANUAL,
+    CANDIDATE_REVIEW,
+    USER_APPROVED,
+    USER_REJECTED,
+)
 from .pdf_processor import (
     PDF_ASSISTANCE_NOTICE,
     PDF_REDACTION_MODES,
     PdfPrivacyProcessor,
     final_output_status,
+    pdf_review_state_path,
     validate_ocr_environment,
     write_pdf_findings_csv,
 )
@@ -52,6 +60,34 @@ EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
 PDF_EXTENSIONS = {".pdf"}
 WORD_EXTENSIONS = {WORD_SUPPORTED_EXTENSION}
 SUPPORTED_EXTENSIONS = EXCEL_EXTENSIONS | PDF_EXTENSIONS | WORD_EXTENSIONS
+
+# PDF findings store detection_kind using internal English constants
+# (USER_APPROVED, etc.) so evaluation tooling and the CSV/audit exports can
+# keep comparing against stable values. This maps them to Japanese labels
+# for on-screen display only.
+#
+# 検査欄は常に「今のレビュー状態」だけを表す方針: CANDIDATE_AUTO(高信頼度の
+# 自動確定)は人が未確認のまま変換される点で USER_APPROVED と同じ状態なので、
+# 同じ「承認済み」ラベルにまとめる。検出方法(GiNZA/PDFテキスト層パターン一
+# 致等)は理由欄でのみ示す。"確認候補" は旧バージョンのPDF側リテラル値の後方
+# 互換用。
+PDF_DETECTION_KIND_LABELS = {
+    CANDIDATE_REVIEW: "要確認",
+    "確認候補": "要確認",
+    USER_APPROVED: "承認済み",
+    USER_REJECTED: "却下済み",
+    CANDIDATE_MANUAL: "手動追加",
+    CANDIDATE_AUTO: "承認済み",
+    "MERGED": "結合済み",
+}
+
+
+def display_detection_kind(value: str) -> str:
+    return PDF_DETECTION_KIND_LABELS.get(value, value)
+
+
+# Same highlight color used by the PDF candidate review dialog's "未確認" rows.
+UNRESOLVED_ROW_COLOR = QColor("#fef3c7")
 
 
 def asset_path(relative_path: str) -> Path:
@@ -262,6 +298,9 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 self.findings = [_finding_from_word_decision(decision) for decision in self.word_decisions]
             else:
                 self.findings = self.processor.scan(self.source_path, options=options)
+            restored_note = ""
+            if self.is_pdf_source() and isinstance(self.processor, PdfPrivacyProcessor):
+                restored_note = self._restore_pdf_review_state()
             self.refresh_table()
             formula_count = (
                 self.processor.enabled_formula_replacement_count(self.findings, options=options)
@@ -281,6 +320,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 self.status_label.setText(
                     f"PDF検査完了: {len(self.findings)} 件を検出しました。"
                     "PDF候補確認で全ページを確認するまで、匿名化済みPDFとして出力できません。"
+                    f"{restored_note}"
                 )
             elif self.is_word_source():
                 review_required_count = sum(1 for finding in self.findings if finding.detection_kind == "要確認(未処理)")
@@ -301,6 +341,31 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         finally:
             if busy_cursor:
                 QApplication.restoreOverrideCursor()
+
+    def _restore_pdf_review_state(self) -> str:
+        """同じ元PDFを再検査したとき、前回このアプリで保存した承認/却下/枠の
+        調整結果を自動で復元する。ファイルが無い・入力PDFが別物・壊れている
+        場合は何もせず、通常の未確認状態のまま検査結果を使う。
+        """
+        if self.source_path is None or not isinstance(self.processor, PdfPrivacyProcessor):
+            return ""
+        state_path = pdf_review_state_path(self.source_path)
+        if not state_path.exists():
+            return ""
+        try:
+            self.processor.import_review_state(state_path, self.source_path, self.findings)
+        except Exception:
+            return ""
+        return " 前回このPDFを確認したときの承認・却下・枠の状態を復元しました。"
+
+    def _save_pdf_review_state(self) -> None:
+        if self.source_path is None or not isinstance(self.processor, PdfPrivacyProcessor):
+            return
+        state_path = pdf_review_state_path(self.source_path)
+        try:
+            self.processor.export_review_state(state_path, self.source_path, self.findings)
+        except Exception:
+            pass
 
     def convert_file(self) -> None:
         if self.source_path is None:
@@ -451,8 +516,22 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             return
         dialog = PdfCandidateReviewDialog(self.processor, self.findings, self)
         dialog.exec()
+        self._save_pdf_review_state()
         self.refresh_table()
         self.status_label.setText("PDF候補確認を反映しました。全ページが確認済みになるまで最終出力できません。")
+
+    def _is_unresolved_row(self, finding: Finding, is_word: bool, is_excel: bool) -> bool:
+        if is_word:
+            return finding.detection_kind == "要確認(未処理)"
+        if is_excel:
+            return (
+                finding.detection_kind in {"確認候補", EXCEL_NLP_DETECTION_KIND}
+                and not finding.enabled
+                and not finding.excluded
+            )
+        if isinstance(self.processor, PdfPrivacyProcessor):
+            return finding.detection_kind in {CANDIDATE_REVIEW, "確認候補"}
+        return False
 
     def refresh_table(self) -> None:
         self.table.blockSignals(True)
@@ -465,9 +544,12 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         editable_offsets = {7} if is_word else {4, 7}
         for row, finding in enumerate(self.findings):
             self.table.insertRow(row)
+            is_unresolved = self._is_unresolved_row(finding, is_word, is_excel)
             enabled = QTableWidgetItem()
             enabled.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             enabled.setCheckState(Qt.Checked if finding.enabled else Qt.Unchecked)
+            if is_unresolved:
+                enabled.setBackground(UNRESOLVED_ROW_COLOR)
             self.table.setItem(row, 0, enabled)
 
             # "変換しない" (reviewed-and-excluded) is a Word/Excel concept --
@@ -484,13 +566,15 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 excluded.setCheckState(Qt.Checked if is_excluded else Qt.Unchecked)
             else:
                 excluded.setFlags(Qt.ItemIsSelectable)
+            if is_unresolved:
+                excluded.setBackground(UNRESOLVED_ROW_COLOR)
             self.table.setItem(row, 1, excluded)
 
             values = [
                 finding.sheet,
                 finding.cell,
                 finding.entity_type,
-                finding.detection_kind,
+                display_detection_kind(finding.detection_kind),
                 finding.original,
                 finding.replacement,
                 finding.reason,
@@ -499,6 +583,8 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 if offset not in editable_offsets:
                     item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                if is_unresolved:
+                    item.setBackground(UNRESOLVED_ROW_COLOR)
                 self.table.setItem(row, offset, item)
         self.table.blockSignals(False)
 
@@ -528,6 +614,33 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             self._refresh_word_row_status(row)
         elif isinstance(self.processor, ExcelPrivacyProcessor):
             self._refresh_excel_row_status(row)
+        elif isinstance(self.processor, PdfPrivacyProcessor):
+            self._refresh_pdf_row_status(row)
+
+    def _refresh_pdf_row_status(self, row: int) -> None:
+        if row >= len(self.findings):
+            return
+        enabled_item = self.table.item(row, 0)
+        finding = self.findings[row]
+        finding.enabled = enabled_item is not None and enabled_item.checkState() == Qt.Checked
+        # 検査欄は常に「今のレビュー状態」を表す方針: 手動追加枠と結合済みの
+        # 項目以外は、メイン一覧のチェックボックス操作でも
+        # USER_APPROVED/USER_REJECTED に切り替える(PDF候補確認ダイアログの
+        # set_selected_enabled と同じ規則)。
+        if finding.detection_kind not in {CANDIDATE_MANUAL, "MERGED"}:
+            finding.detection_kind = USER_APPROVED if finding.enabled else USER_REJECTED
+        self.table.blockSignals(True)
+        status_item = self.table.item(row, 5)
+        if status_item is not None:
+            status_item.setText(display_detection_kind(finding.detection_kind))
+        self._refresh_row_highlight(row, self._is_unresolved_row(finding, is_word=False, is_excel=False))
+        self.table.blockSignals(False)
+
+    def _refresh_row_highlight(self, row: int, is_unresolved: bool) -> None:
+        for column in range(self.table.columnCount()):
+            cell_item = self.table.item(row, column)
+            if cell_item is not None:
+                cell_item.setBackground(UNRESOLVED_ROW_COLOR if is_unresolved else QBrush())
 
     def _refresh_excel_row_status(self, row: int) -> None:
         if row >= len(self.findings):
@@ -552,6 +665,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         reason_item = self.table.item(row, 8)
         if reason_item is not None:
             reason_item.setText(finding.reason)
+        self._refresh_row_highlight(row, self._is_unresolved_row(finding, is_word=False, is_excel=True))
         self.table.blockSignals(False)
 
     def _refresh_word_row_status(self, row: int) -> None:
@@ -564,15 +678,23 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         decision.excluded = bool(
             excluded_item is not None and excluded_item.checkState() == Qt.Checked and not decision.enabled
         )
+        status = word_finding_status(decision)
         if row < len(self.findings):
             self.findings[row].enabled = decision.enabled
+            # word_finding_status() is re-derived from `decision` on every
+            # call rather than stored anywhere, so keep the Finding's own
+            # detection_kind (read by _is_unresolved_row for the row
+            # highlight) in sync too instead of only updating the cell text.
+            self.findings[row].detection_kind = status
         self.table.blockSignals(True)
         status_item = self.table.item(row, 5)
         if status_item is not None:
-            status_item.setText(word_finding_status(decision))
+            status_item.setText(status)
         reason_item = self.table.item(row, 8)
         if reason_item is not None:
             reason_item.setText(word_finding_reason(decision))
+        if row < len(self.findings):
+            self._refresh_row_highlight(row, self._is_unresolved_row(self.findings[row], is_word=True, is_excel=False))
         self.table.blockSignals(False)
 
     def toggle_selected(self) -> None:

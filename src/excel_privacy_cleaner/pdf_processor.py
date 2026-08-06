@@ -76,6 +76,10 @@ OCR_MIN_TEXT_CHARS = 20
 TESSDATA_FILES = ("jpn.traineddata", "eng.traineddata", "osd.traineddata")
 
 
+def pdf_review_state_path(source_path: Path) -> Path:
+    return source_path.with_name(f"{source_path.stem}.pdf_review_state.json")
+
+
 @dataclass(frozen=True)
 class PdfConversionResult:
     pdf_path: Path
@@ -204,7 +208,7 @@ class PdfPrivacyProcessor:
                 page = doc[page_index]
                 page_label = f"ページ{page_index + 1}"
                 page_text = page.get_text("text").strip()
-                text_spans = list(_iter_spans(page.get_text("dict")))
+                text_spans = list(_iter_spans(page.get_text("rawdict")))
                 if len(page_text) >= OCR_MIN_TEXT_CHARS and text_spans:
                     self.page_modes[page_index] = "text"
                     self.page_quality[page_index] = _text_page_quality(page, page_text)
@@ -233,7 +237,7 @@ class PdfPrivacyProcessor:
                         self.page_quality[page_index] = evaluate_page_quality(page, "", [], [], exception=str(exc))
                         self._initialize_page_state(page_index)
                         continue
-                for span_text, bbox in text_spans:
+                for span_text, bbox, char_bboxes in text_spans:
                     if not span_text.strip():
                         continue
                     occupied: list[range] = []
@@ -250,6 +254,7 @@ class PdfPrivacyProcessor:
                             entity_type,
                             occupied,
                             known_family_names,
+                            char_bboxes,
                         )
                     for result in self.detector.analyze(span_text):
                         self._append_pdf_finding(
@@ -264,6 +269,7 @@ class PdfPrivacyProcessor:
                             result.entity_type,
                             occupied,
                             known_family_names,
+                            char_bboxes,
                         )
                     for surname, alias in known_family_names.items():
                         for match in re.finditer(rf"{re.escape(surname)}(?:さん|様|氏)", span_text):
@@ -280,10 +286,11 @@ class PdfPrivacyProcessor:
                                 start=match.start(),
                                 end=match.end(),
                                 entity_type="氏名候補",
-                                detection_kind="確認候補",
+                                detection_kind=CANDIDATE_REVIEW,
                                 original=match.group(0),
                                 replacement=f"{replacement}{match.group(0)[len(surname):]}",
                                 reason="姓のみの敬称表現のため要確認",
+                                char_bboxes=char_bboxes,
                             )
                             self._append_finding(findings, seen, finding)
                             occupied.append(match_range)
@@ -323,12 +330,79 @@ class PdfPrivacyProcessor:
                             original=original,
                             replacement=replacement,
                             reason=f"{WORD_NLP_DETECTION_RULE}(信頼度{WORD_NLP_CONFIDENCE:.2f})",
+                            char_bboxes=char_bboxes,
                         )
                         self._append_finding(findings, seen, finding)
                         occupied.append(match_range)
+
+            self._propagate_known_literals_across_pages(doc, findings, seen)
         finally:
             doc.close()
         return findings
+
+    def _propagate_known_literals_across_pages(
+        self,
+        doc: Any,
+        findings: list[Finding],
+        seen: set[tuple[str, str, str, str, str]],
+    ) -> None:
+        """Catch exact repeats, on other pages, of a name/company/etc. already
+        found somewhere in the document.
+
+        A name confidently detected on one page (mainly via GiNZA, which --
+        unlike the regex/Presidio "known_family_names" surname pass above --
+        has no cross-page propagation) can appear verbatim elsewhere without
+        independently triggering any detection rule there, e.g. a company
+        name introduced once with clear context ("取引先: 比良タイヤ工業所")
+        then repeated later in a plain list with no surrounding cue. Left
+        alone, approving the one detected occurrence still leaves the others
+        unredacted, which the post-output residual-text check correctly
+        flags as a failure. Scoped to text-layer pages only (OCR pages run
+        their own separate candidate pipeline).
+        """
+        propagation_targets: dict[str, tuple[str, str]] = {}
+        flagged_pages: dict[str, set[str]] = {}
+        for finding in findings:
+            flagged_pages.setdefault(finding.original, set()).add(finding.sheet)
+            if finding.entity_type in {"氏名", "会社名", "住所", "銀行名"} and len(finding.original) >= 3:
+                propagation_targets.setdefault(finding.original, (finding.entity_type, finding.replacement))
+        if not propagation_targets:
+            return
+
+        for page_index in range(doc.page_count):
+            if self.page_modes.get(page_index) != "text":
+                continue
+            page_label = f"ページ{page_index + 1}"
+            page = doc[page_index]
+            for span_text, bbox, char_bboxes in _iter_spans(page.get_text("rawdict")):
+                if not span_text.strip():
+                    continue
+                occupied: list[range] = []
+                for original, (entity_type, replacement) in propagation_targets.items():
+                    if page_label in flagged_pages.get(original, set()) or original not in span_text:
+                        continue
+                    for match in re.finditer(re.escape(original), span_text):
+                        match_range = range(match.start(), match.end())
+                        if any(match_range.start < item.stop and item.start < match_range.stop for item in occupied):
+                            continue
+                        new_finding = self._make_finding(
+                            enabled=False,
+                            page_label=page_label,
+                            page_index=page_index,
+                            bbox=bbox,
+                            span_text=span_text,
+                            start=match.start(),
+                            end=match.end(),
+                            entity_type=entity_type,
+                            detection_kind=CANDIDATE_REVIEW,
+                            original=match.group(0),
+                            replacement=replacement,
+                            reason=f"document_propagation: 同一文書内の他ページで検出済みの文字列「{original}」と完全一致。信頼度=MEDIUM",
+                            char_bboxes=char_bboxes,
+                        )
+                        self._append_finding(findings, seen, new_finding)
+                        occupied.append(match_range)
+                        flagged_pages.setdefault(original, set()).add(page_label)
 
     def convert_with_artifacts(
         self,
@@ -398,7 +472,7 @@ class PdfPrivacyProcessor:
         finally:
             doc.close()
 
-        validation_warnings = validate_pdf_output(source_path, output_path, selected, failed_pages)
+        validation_warnings = validate_pdf_output(source_path, output_path, selected, failed_pages, self.locations)
         warnings.extend(validation_warnings)
         warnings.extend(sanitize_notes)
         if validation_warnings:
@@ -518,7 +592,7 @@ class PdfPrivacyProcessor:
             location = self.locations.get((finding.sheet, finding.cell, finding.original))
             payload["findings"].append(
                 {
-                    "id": _finding_state_id(finding, location),
+                    "id": _finding_state_id(finding),
                     "page_number": _page_index_from_label(finding.sheet) + 1,
                     "entity_type": finding.entity_type,
                     "detection_kind": finding.detection_kind,
@@ -553,10 +627,7 @@ class PdfPrivacyProcessor:
         }
         self.last_review_page = int(payload.get("last_page", 0))
 
-        existing = {
-            _finding_state_id(finding, self.locations.get((finding.sheet, finding.cell, finding.original))): finding
-            for finding in findings
-        }
+        existing = {_finding_state_id(finding): finding for finding in findings}
         for saved in payload.get("findings", []):
             rect_value = saved.get("rect")
             rect = tuple(float(value) for value in rect_value) if rect_value else None
@@ -599,6 +670,7 @@ class PdfPrivacyProcessor:
         recognizer_entity_type: str,
         occupied: list[range],
         known_family_names: dict[str, str],
+        char_bboxes: tuple[tuple[float, float, float, float], ...] = (),
     ) -> None:
         match_range = range(start, end)
         if any(match_range.start < item.stop and item.start < match_range.stop for item in occupied):
@@ -613,6 +685,11 @@ class PdfPrivacyProcessor:
             label = "氏名"
             kind = "name"
             replacement = replacement_for(kind, original, self.alias_book, self.options)
+        # This is only reached from the text-layer per-span loop in scan()
+        # (OCR pages `continue` before ever getting here), so detection_kind
+        # is always CANDIDATE_AUTO here -- the 検査 column always reflects
+        # review status, never detection method; "PDFテキスト層から検出"
+        # already says how it was found, in the 理由 column.
         finding = self._make_finding(
             enabled=True,
             page_label=page_label,
@@ -622,10 +699,11 @@ class PdfPrivacyProcessor:
             start=start,
             end=end,
             entity_type=label,
-            detection_kind="OCR" if self.page_modes.get(page_index) == "ocr" else "PDFテキスト",
+            detection_kind=CANDIDATE_AUTO,
             original=original,
             replacement=replacement,
-            reason="OCRテキスト層から検出" if self.page_modes.get(page_index) == "ocr" else "PDFテキスト層から検出",
+            reason="PDFテキスト層から検出",
+            char_bboxes=char_bboxes,
         )
         self._append_finding(findings, seen, finding)
         occupied.append(match_range)
@@ -671,8 +749,9 @@ class PdfPrivacyProcessor:
         original: str,
         replacement: str,
         reason: str,
+        char_bboxes: tuple[tuple[float, float, float, float], ...] = (),
     ) -> Finding:
-        rect = _substring_rect(bbox, span_text, start, end)
+        rect = _substring_rect(bbox, span_text, start, end, char_bboxes)
         cell = f"{page_index + 1}-{len(self.locations) + 1:04d} ({PdfLocation(page_index, rect).coordinate_text})"
         finding = Finding(
             enabled=enabled,
@@ -994,6 +1073,7 @@ def validate_pdf_output(
     output_path: Path,
     findings: list[Finding],
     failed_pages: set[int],
+    locations: dict[tuple[str, str, str], PdfLocation] | None = None,
 ) -> list[str]:
     warnings: list[str] = []
     if source_path.resolve() == output_path.resolve():
@@ -1007,15 +1087,38 @@ def validate_pdf_output(
             if failed_pages:
                 pages = ", ".join(str(page + 1) for page in sorted(failed_pages))
                 warnings.append(f"処理に失敗したページがあります: {pages}")
-            output_text = "\n".join(output_doc[index].get_text("text") for index in range(output_doc.page_count))
-            for original in _sensitive_originals(findings):
-                if original and original in output_text:
-                    warnings.append(f"出力PDFのテキスト抽出結果に元文字列が残っています: {original}")
+            # Scoped to each finding's own rect, not the whole page/document:
+            # the same literal string (e.g. a short company abbreviation)
+            # can legitimately be approved for redaction in one spot and
+            # rejected/kept elsewhere in the same document. A document-wide
+            # or page-wide "does this text still appear anywhere" search
+            # would then always fail even though the approved location was
+            # correctly redacted -- it was finding the deliberately-kept
+            # occurrences, not a leak. See report: "LCS" approved once
+            # (page 1) but rejected at 23 other locations across the doc.
+            locations = locations or {}
             for finding in findings:
-                for page_index in range(output_doc.page_count):
-                    if output_doc[page_index].search_for(finding.original):
-                        warnings.append(f"出力PDF検索で元文字列が見つかりました: {finding.original}")
-                        break
+                if not finding.enabled or not finding.original:
+                    continue
+                page_index = _page_index_from_label(finding.sheet)
+                if page_index < 0 or page_index >= output_doc.page_count:
+                    continue
+                page = output_doc[page_index]
+                location = locations.get((finding.sheet, finding.cell, finding.original))
+                if location is not None:
+                    pad = 2.0
+                    x0, y0, x1, y1 = location.rect
+                    clip = fitz.Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad)
+                    residual_text = page.get_text("text", clip=clip)
+                else:
+                    # No recorded location (shouldn't normally happen for an
+                    # enabled finding) -- fall back to a whole-page check
+                    # rather than silently skipping verification.
+                    residual_text = page.get_text("text")
+                if finding.original in residual_text:
+                    warnings.append(
+                        f"出力PDFの匿名化対象範囲に元文字列が残っています: {finding.sheet} - {finding.original}"
+                    )
             ocr_findings = [finding for finding in findings if finding.detection_kind in {CANDIDATE_AUTO, USER_APPROVED, CANDIDATE_MANUAL}]
             if ocr_findings:
                 ocr_runtime_error = _ocr_runtime_error()
@@ -1065,15 +1168,16 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _finding_state_id(finding: Finding, location: PdfLocation | None) -> str:
-    rect_text = ",".join(f"{value:.3f}" for value in location.rect) if location else ""
+def _finding_state_id(finding: Finding) -> str:
+    # Only sheet/cell/original are stable across a review session -- entity_type,
+    # detection_kind, and the box rect all change as the user approves/rejects/
+    # edits a candidate, so including them here would make a reviewed finding's
+    # id diverge from the pristine id computed on the next fresh scan, and
+    # import_review_state would silently fail to match anything ever reviewed.
     payload = "|".join(
         [
             finding.sheet,
             finding.cell,
-            finding.entity_type,
-            finding.detection_kind,
-            rect_text,
             _hmac_digest(finding.original) if finding.original else "",
         ]
     )
@@ -1115,9 +1219,26 @@ def _iter_spans(text_dict: dict[str, Any]):
     for block in text_dict.get("blocks", []):
         for line in block.get("lines", []):
             for span in line.get("spans", []):
-                text = str(span.get("text", ""))
                 bbox = tuple(float(item) for item in span.get("bbox", (0, 0, 0, 0)))
-                yield text, bbox
+                chars = span.get("chars")
+                if chars:
+                    # "rawdict" gives per-character boxes, which lets
+                    # _substring_rect place a candidate's redaction rect
+                    # exactly instead of estimating it by dividing the
+                    # span's width evenly across the character count (which
+                    # drifts whenever a span mixes half-width and
+                    # full-width characters, e.g. digits inside Japanese
+                    # text).
+                    text = "".join(str(char.get("c", "")) for char in chars)
+                    char_bboxes = tuple(
+                        tuple(float(value) for value in char.get("bbox", (0, 0, 0, 0))) for char in chars
+                    )
+                else:
+                    # "dict" (or an OCR textpage's extractDICT()) has no
+                    # per-character boxes -- fall back to the span-level text.
+                    text = str(span.get("text", ""))
+                    char_bboxes = ()
+                yield text, bbox, char_bboxes
 
 
 def _text_page_quality(page: Any, text: str) -> PdfPageQuality:
@@ -1261,12 +1382,30 @@ def _pdf_extra_results(text: str) -> list[tuple[int, int, str]]:
     return results
 
 
-def _substring_rect(bbox: tuple[float, float, float, float], text: str, start: int, end: int) -> tuple[float, float, float, float]:
+def _substring_rect(
+    bbox: tuple[float, float, float, float],
+    text: str,
+    start: int,
+    end: int,
+    char_bboxes: tuple[tuple[float, float, float, float], ...] = (),
+) -> tuple[float, float, float, float]:
     x0, y0, x1, y1 = bbox
+    pad = 1.5
+    if char_bboxes and len(char_bboxes) == len(text):
+        clipped_start = min(max(start, 0), len(char_bboxes))
+        clipped_end = min(max(end, clipped_start), len(char_bboxes))
+        selected = char_bboxes[clipped_start:clipped_end]
+        if selected:
+            left = min(char[0] for char in selected)
+            top = min(char[1] for char in selected)
+            right = max(char[2] for char in selected)
+            bottom = max(char[3] for char in selected)
+            return (max(x0, left - pad), max(y0, top - pad), min(x1, right + pad), min(y1, bottom + pad))
+    # Fallback for spans without per-character boxes (e.g. OCR textpages):
+    # estimate by evenly dividing the span's width across its characters.
     text_len = max(len(text), 1)
     left = x0 + (x1 - x0) * max(start, 0) / text_len
     right = x0 + (x1 - x0) * min(end, text_len) / text_len
-    pad = 1.5
     return (max(x0, left - pad), max(y0, y0 - pad), min(x1, right + pad), min(y1 + pad, y1 + pad))
 
 
@@ -1302,7 +1441,8 @@ def _sensitive_originals(findings: list[Finding]) -> list[str]:
     values = {
         finding.original
         for finding in findings
-        if finding.entity_type in {
+        if finding.enabled
+        and finding.entity_type in {
             "氏名",
             "氏名カナ",
             "氏名候補",
