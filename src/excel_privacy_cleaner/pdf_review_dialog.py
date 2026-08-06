@@ -45,11 +45,48 @@ from .pdf_ocr_support import (
     PAGE_REVIEWED_NO_SENSITIVE_DATA,
     PAGE_REVIEWED_WITH_REDACTIONS,
     QUALITY_FAILED,
+    QUALITY_PASS,
     QUALITY_REVIEW,
     USER_APPROVED,
     USER_REJECTED,
 )
 from .pdf_processor import PdfLocation, PdfPrivacyProcessor
+
+
+# 検出候補の内部ステータス値(英語の定数)を画面表示用の日本語ラベルに変換する。
+# qt_app.py のメイン一覧にある PDF_DETECTION_KIND_LABELS と表記を揃えている。
+#
+# 検査欄は常に「今のレビュー状態」だけを表す方針: 検出方法(GiNZA/PDFテキス
+# ト層パターン一致/OCR等)は理由欄にのみ出す。CANDIDATE_AUTO は「システムが
+# 自動承認した」状態であり、人が未確認のまま変換される点は USER_APPROVED と
+# 同じなので、承認済みと同じラベルに統合する。"確認候補" は旧バージョンで
+# PDF側が使っていたリテラル値の後方互換用(古い保存済みレビュー状態ファイル
+# を読み込んだ場合に残り得る)。
+_CANDIDATE_STATUS_LABELS = {
+    CANDIDATE_REVIEW: "未確認",
+    "確認候補": "未確認",
+    USER_APPROVED: "承認済み",
+    USER_REJECTED: "却下済み",
+    CANDIDATE_MANUAL: "手動追加",
+    CANDIDATE_AUTO: "承認済み",
+    "MERGED": "結合済み",
+}
+
+_PAGE_QUALITY_LABELS = {
+    QUALITY_PASS: "正常",
+    QUALITY_REVIEW: "要確認",
+    QUALITY_FAILED: "失敗",
+}
+
+_UNRESOLVED_ROW_COLOR = QColor("#fef3c7")
+
+
+def _candidate_status_label(finding: Finding) -> str:
+    return _CANDIDATE_STATUS_LABELS.get(finding.detection_kind, "有効" if finding.enabled else "解除")
+
+
+def _page_quality_label(verdict: str) -> str:
+    return _PAGE_QUALITY_LABELS.get(verdict, verdict)
 
 
 class ZoomableGraphicsView(QGraphicsView):
@@ -213,7 +250,7 @@ class PdfCandidateReviewDialog(QDialog):
         self.page_combo = QComboBox()
         for index in range(max(self.processor.page_count, 1)):
             quality = self.processor.page_quality.get(index)
-            suffix = f" - {quality.verdict}" if quality else ""
+            suffix = f" - {_page_quality_label(quality.verdict)}" if quality else ""
             self.page_combo.addItem(f"ページ{index + 1}{suffix}", index)
         self.page_combo.currentIndexChanged.connect(self.reload_page)
 
@@ -253,12 +290,12 @@ class PdfCandidateReviewDialog(QDialog):
         next_unresolved_button = QPushButton("次の未確認候補")
         next_unreviewed_button = QPushButton("次の未確認ページ")
         previous_unreviewed_button = QPushButton("前の未確認ページ")
-        next_review_button = QPushButton("次のREVIEWページ")
-        next_failed_button = QPushButton("次のFAILEDページ")
+        next_review_button = QPushButton("次の要確認ページ")
+        next_failed_button = QPushButton("次の失敗ページ")
         close_button = QPushButton("閉じる")
 
         approve_button.clicked.connect(lambda: self.set_selected_enabled(True, advance_after=True))
-        reject_button.clicked.connect(lambda: self.set_selected_enabled(False))
+        reject_button.clicked.connect(lambda: self.set_selected_enabled(False, advance_after=True))
         apply_button.clicked.connect(self.apply_selected_edits)
         add_button.clicked.connect(self.add_manual_item)
         delete_manual_button.clicked.connect(self.delete_selected_manual_items)
@@ -291,7 +328,7 @@ class PdfCandidateReviewDialog(QDialog):
         left = QVBoxLayout()
         left.addLayout(page_nav)
         left.addWidget(self.view, 1)
-        legend = QLabel("緑: 自動候補 / 黄: 要確認 / 赤: FAILED系 / 青: 手動追加")
+        legend = QLabel("緑: 承認済み(変換対象) / 黄: 要確認 / 灰: 却下済み / 青: 手動追加")
         legend.setStyleSheet("color: #4b5563;")
         left.addWidget(legend)
         left_widget = QWidget()
@@ -304,6 +341,9 @@ class PdfCandidateReviewDialog(QDialog):
         candidate_group.setMinimumHeight(170)
         candidate_group.setMaximumHeight(240)
         candidate_layout = QVBoxLayout()
+        candidate_hint = QLabel("黄色の行は未承認・未解除(未確認)の候補です")
+        candidate_hint.setStyleSheet("color: #92400e; background: #fef3c7; padding: 2px 4px;")
+        candidate_layout.addWidget(candidate_hint)
         candidate_layout.addWidget(self.candidate_table)
         candidate_group.setLayout(candidate_layout)
         right.addWidget(candidate_group)
@@ -406,6 +446,8 @@ class PdfCandidateReviewDialog(QDialog):
         self.scene.setSceneRect(self.scene.itemsBoundingRect())
         self.refresh_page_table()
         self.refresh_candidate_table()
+        if self.candidate_rows:
+            self.select_finding_item(self.candidate_rows[0])
 
     def sync_items_to_locations(self) -> None:
         for item, finding in list(self.items.items()):
@@ -426,7 +468,11 @@ class PdfCandidateReviewDialog(QDialog):
         for item in items:
             finding = self.items[item]
             finding.enabled = enabled
-            if finding.detection_kind in {CANDIDATE_REVIEW, USER_APPROVED, USER_REJECTED}:
+            # 検査欄は常に「今のレビュー状態」を表す方針: 手動追加枠と結合済
+            # みの項目以外は、検出方法(GiNZA/自動確定/確認候補など)を問わず
+            # 人が承認/却下した時点で必ず USER_APPROVED/USER_REJECTED に切
+            # り替える。
+            if finding.detection_kind not in {CANDIDATE_MANUAL, "MERGED"}:
                 finding.detection_kind = USER_APPROVED if enabled else USER_REJECTED
             self._style_item(item, finding)
         self.sync_items_to_locations()
@@ -538,7 +584,7 @@ class PdfCandidateReviewDialog(QDialog):
             for finding in self.findings:
                 if _page_index(finding.sheet) == self.page_index:
                     finding.enabled = False
-                    if finding.detection_kind in {CANDIDATE_REVIEW, USER_APPROVED, USER_REJECTED}:
+                    if finding.detection_kind not in {CANDIDATE_MANUAL, "MERGED"}:
                         finding.detection_kind = USER_REJECTED
         self.processor.mark_page_no_sensitive_data(self.page_index)
         self.refresh_page_table()
@@ -601,9 +647,9 @@ class PdfCandidateReviewDialog(QDialog):
             self.candidate_table.setRowCount(0)
             for row, finding in enumerate(self.candidate_rows):
                 self.candidate_table.insertRow(row)
-                state = "有効" if finding.enabled else "解除"
+                is_unresolved = finding.detection_kind in {CANDIDATE_REVIEW, "確認候補"}
                 values = [
-                    state,
+                    _candidate_status_label(finding),
                     finding.entity_type,
                     finding.replacement,
                     finding.reason,
@@ -612,6 +658,8 @@ class PdfCandidateReviewDialog(QDialog):
                 for col, value in enumerate(values):
                     item = QTableWidgetItem(value)
                     item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                    if is_unresolved:
+                        item.setBackground(_UNRESOLVED_ROW_COLOR)
                     self.candidate_table.setItem(row, col, item)
                 if finding is selected_finding:
                     self.candidate_table.selectRow(row)
@@ -698,14 +746,16 @@ class PdfCandidateReviewDialog(QDialog):
             item.setPen(pen)
             item.setBrush(Qt.NoBrush)
             return
-        if finding.detection_kind == CANDIDATE_AUTO:
-            color = QColor(20, 160, 80)
-        elif finding.detection_kind == CANDIDATE_MANUAL:
-            color = QColor(30, 100, 220)
-        elif finding.detection_kind in {CANDIDATE_REVIEW, USER_APPROVED, USER_REJECTED}:
-            color = QColor(230, 180, 20)
+        if finding.detection_kind == CANDIDATE_MANUAL:
+            color = QColor(30, 100, 220)  # 青: 手動追加
+        elif finding.detection_kind in {CANDIDATE_REVIEW, "確認候補"}:
+            color = QColor(230, 180, 20)  # 黄: 要確認(未着手)
+        elif finding.detection_kind == USER_REJECTED:
+            color = QColor(140, 140, 140)  # 灰: 却下済み
+        elif finding.detection_kind in {CANDIDATE_AUTO, USER_APPROVED}:
+            color = QColor(20, 160, 80)  # 緑: 承認済み(自動確定/利用者承認とも変換対象)
         else:
-            color = QColor(180, 70, 70)
+            color = QColor(180, 70, 70)  # 赤: 想定外の状態
         pen = QPen(color, 3 if finding.enabled else 1.5)
         item.setZValue(5 if finding.enabled else 1)
         item.setPen(pen)
