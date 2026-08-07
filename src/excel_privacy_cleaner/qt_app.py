@@ -44,6 +44,15 @@ from .pdf_processor import (
     write_pdf_findings_csv,
 )
 from .pdf_review_dialog import PdfCandidateReviewDialog
+from .pptx_processor import (
+    PPTX_SUPPORTED_EXTENSION,
+    PptxPrivacyProcessor,
+    PptxReplacementDecision,
+    pptx_candidate_location_label,
+    pptx_finding_reason,
+    pptx_finding_status,
+    write_pptx_findings_csv,
+)
 from .resources import resource_path
 from .word_processor import (
     WORD_SUPPORTED_EXTENSION,
@@ -59,7 +68,8 @@ from .word_processor import (
 EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
 PDF_EXTENSIONS = {".pdf"}
 WORD_EXTENSIONS = {WORD_SUPPORTED_EXTENSION}
-SUPPORTED_EXTENSIONS = EXCEL_EXTENSIONS | PDF_EXTENSIONS | WORD_EXTENSIONS
+PPTX_EXTENSIONS = {PPTX_SUPPORTED_EXTENSION}
+SUPPORTED_EXTENSIONS = EXCEL_EXTENSIONS | PDF_EXTENSIONS | WORD_EXTENSIONS | PPTX_EXTENSIONS
 
 # PDF findings store detection_kind using internal English constants
 # (USER_APPROVED, etc.) so evaluation tooling and the CSV/audit exports can
@@ -111,6 +121,23 @@ def _finding_from_word_decision(decision: WordReplacementDecision) -> Finding:
     )
 
 
+def _finding_from_pptx_decision(decision: PptxReplacementDecision) -> Finding:
+    candidate = decision.candidate
+    return Finding(
+        enabled=decision.enabled,
+        sheet=pptx_candidate_location_label(candidate),
+        cell="",
+        entity_type=candidate.category,
+        detection_kind=pptx_finding_status(decision),
+        original=candidate.text,
+        replacement=decision.replacement,
+        reason=pptx_finding_reason(decision),
+        start=candidate.char_start,
+        end=candidate.char_end,
+        excluded=decision.excluded,
+    )
+
+
 class ExcelPrivacyCleanerWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -122,10 +149,11 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         self.setMinimumSize(980, 640)
         self.setAcceptDrops(True)
 
-        self.processor: ExcelPrivacyProcessor | PdfPrivacyProcessor | WordPrivacyProcessor = ExcelPrivacyProcessor()
+        self.processor: ExcelPrivacyProcessor | PdfPrivacyProcessor | WordPrivacyProcessor | PptxPrivacyProcessor = ExcelPrivacyProcessor()
         self.source_path: Path | None = None
         self.findings: list[Finding] = []
         self.word_decisions: list[WordReplacementDecision] = []
+        self.pptx_decisions: list[PptxReplacementDecision] = []
 
         self.path_label = QLabel("未選択")
         self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -146,7 +174,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
 
-        title = QLabel("Excel / PDF / Word ファイルを選択してください。検出はこの PC 内だけで行い、原本は上書きしません。")
+        title = QLabel("Excel / PDF / Word / PowerPoint ファイルを選択してください。検出はこの PC 内だけで行い、原本は上書きしません。")
         title.setStyleSheet("font-size: 15px; font-weight: 600;")
         layout.addWidget(title)
 
@@ -177,7 +205,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         self.update_mode_note()
 
         file_row = QHBoxLayout()
-        choose_button = QPushButton("Excel/PDF/Wordを選択")
+        choose_button = QPushButton("Excel/PDF/Word/PowerPointを選択")
         scan_button = QPushButton("検査開始")
         convert_button = QPushButton("確認済みを変換保存")
         choose_button.clicked.connect(self.choose_file)
@@ -247,25 +275,28 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             self,
             "検査するファイルを選択",
             "",
-            "Supported files (*.xlsx *.xlsm *.pdf *.docx);;Excel files (*.xlsx *.xlsm);;PDF files (*.pdf);;Word files (*.docx)",
+            "Supported files (*.xlsx *.xlsm *.pdf *.docx *.pptx);;Excel files (*.xlsx *.xlsm);;PDF files (*.pdf);;Word files (*.docx);;PowerPoint files (*.pptx)",
         )
         if filename:
             self.set_source(Path(filename))
 
     def set_source(self, path: Path) -> None:
         if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-            QMessageBox.warning(self, "形式エラー", "対応形式は .xlsx / .xlsm / .pdf / .docx です。")
+            QMessageBox.warning(self, "形式エラー", "対応形式は .xlsx / .xlsm / .pdf / .docx / .pptx です。")
             return
         self.processor.cleanup()
         if path.suffix.lower() in PDF_EXTENSIONS:
             self.processor = PdfPrivacyProcessor()
         elif path.suffix.lower() in WORD_EXTENSIONS:
             self.processor = WordPrivacyProcessor()
+        elif path.suffix.lower() in PPTX_EXTENSIONS:
+            self.processor = PptxPrivacyProcessor()
         else:
             self.processor = ExcelPrivacyProcessor()
         self.source_path = path
         self.findings = []
         self.word_decisions = []
+        self.pptx_decisions = []
         self.path_label.setText(str(path))
         self.update_mode_note()
         self.refresh_table()
@@ -296,6 +327,9 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             if self.is_word_source() and isinstance(self.processor, WordPrivacyProcessor):
                 self.word_decisions = self.processor.scan(self.source_path, options=options)
                 self.findings = [_finding_from_word_decision(decision) for decision in self.word_decisions]
+            elif self.is_pptx_source() and isinstance(self.processor, PptxPrivacyProcessor):
+                self.pptx_decisions = self.processor.scan(self.source_path, options=options)
+                self.findings = [_finding_from_pptx_decision(decision) for decision in self.pptx_decisions]
             else:
                 self.findings = self.processor.scan(self.source_path, options=options)
             restored_note = ""
@@ -326,6 +360,12 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 review_required_count = sum(1 for finding in self.findings if finding.detection_kind == "要確認(未処理)")
                 self.status_label.setText(
                     f"Word検査完了: {len(self.findings)} 件を検出しました。"
+                    f"要確認候補 {review_required_count} 件は変換前に承認(チェック)してください。"
+                )
+            elif self.is_pptx_source():
+                review_required_count = sum(1 for finding in self.findings if finding.detection_kind == "要確認(未処理)")
+                self.status_label.setText(
+                    f"PPTX検査完了: {len(self.findings)} 件を検出しました。"
                     f"要確認候補 {review_required_count} 件は変換前に承認(チェック)してください。"
                 )
             else:
@@ -397,6 +437,30 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                     "保存完了",
                     "匿名化済み Word、検出・変換結果CSV、処理報告書を保存しました。\n\n"
                     f"Word: {result.output_path}\nCSV: {result.csv_path}\n報告書: {result.report_path}"
+                    f"{warning_note}\n\n"
+                    "原本は上書きしていません。一時コピーは削除済みです。",
+                )
+            elif self.is_pptx_source() and isinstance(self.processor, PptxPrivacyProcessor):
+                self._sync_pptx_decisions_from_findings()
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                busy_cursor = True
+                QApplication.processEvents()
+                result = self.processor.convert(self.source_path, self.pptx_decisions)
+                QApplication.restoreOverrideCursor()
+                busy_cursor = False
+                output_path = result.output_path
+                converted_count = result.converted_run_count + result.converted_property_count
+                self.history.insertItem(
+                    0,
+                    f"{datetime.now():%Y/%m/%d %H:%M:%S}  {options.mode_label}  {converted_count} 件変換  {output_path.name}  一時ファイル削除済み",
+                )
+                self.status_label.setText(f"保存完了: {output_path}")
+                warning_note = ("\n\n警告:\n" + "\n".join(result.warnings)) if result.warnings else ""
+                QMessageBox.information(
+                    self,
+                    "保存完了",
+                    "匿名化済み PPTX、検出・変換結果CSV、処理報告書を保存しました。\n\n"
+                    f"PPTX: {result.output_path}\nCSV: {result.csv_path}\n報告書: {result.report_path}"
                     f"{warning_note}\n\n"
                     "原本は上書きしていません。一時コピーは削除済みです。",
                 )
@@ -480,6 +544,8 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         self.update_findings_from_table()
         if self.is_word_source():
             self._sync_word_decisions_from_findings()
+        elif self.is_pptx_source():
+            self._sync_pptx_decisions_from_findings()
         default_name = self._default_csv_name()
         filename, _ = QFileDialog.getSaveFileName(
             self,
@@ -499,6 +565,8 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 write_pdf_findings_csv(path, self.findings)
             elif self.is_word_source():
                 write_word_findings_csv(path, self.word_decisions)
+            elif self.is_pptx_source():
+                write_pptx_findings_csv(path, self.pptx_decisions)
             else:
                 write_findings_csv(path, self.findings)
             self.status_label.setText(f"CSV出力完了: {path}")
@@ -520,8 +588,8 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         self.refresh_table()
         self.status_label.setText("PDF候補確認を反映しました。全ページが確認済みになるまで最終出力できません。")
 
-    def _is_unresolved_row(self, finding: Finding, is_word: bool, is_excel: bool) -> bool:
-        if is_word:
+    def _is_unresolved_row(self, finding: Finding, is_word: bool, is_excel: bool, is_pptx: bool = False) -> bool:
+        if is_word or is_pptx:
             return finding.detection_kind == "要確認(未処理)"
         if is_excel:
             return (
@@ -537,14 +605,16 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         self.table.blockSignals(True)
         self.table.setRowCount(0)
         is_word = self.is_word_source()
+        is_pptx = self.is_pptx_source()
         is_excel = isinstance(self.processor, ExcelPrivacyProcessor)
-        # Word candidate categories are fixed by detection and can't be edited
-        # after the fact (WordCandidate is immutable), unlike Excel/PDF's
-        # entity_type, so column 4 stays read-only for Word rows.
-        editable_offsets = {7} if is_word else {4, 7}
+        # Word/PPTX candidate categories are fixed by detection and can't be
+        # edited after the fact (WordCandidate/PptxCandidate are immutable),
+        # unlike Excel/PDF's entity_type, so column 4 stays read-only for
+        # their rows.
+        editable_offsets = {7} if (is_word or is_pptx) else {4, 7}
         for row, finding in enumerate(self.findings):
             self.table.insertRow(row)
-            is_unresolved = self._is_unresolved_row(finding, is_word, is_excel)
+            is_unresolved = self._is_unresolved_row(finding, is_word, is_excel, is_pptx)
             enabled = QTableWidgetItem()
             enabled.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             enabled.setCheckState(Qt.Checked if finding.enabled else Qt.Unchecked)
@@ -552,15 +622,17 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 enabled.setBackground(UNRESOLVED_ROW_COLOR)
             self.table.setItem(row, 0, enabled)
 
-            # "変換しない" (reviewed-and-excluded) is a Word/Excel concept --
-            # PDF has its own separate page-by-page review dialog and no
+            # "変換しない" (reviewed-and-excluded) is a Word/PPTX/Excel concept
+            # -- PDF has its own separate page-by-page review dialog and no
             # third state here, so the checkbox stays absent (not just
             # unchecked) for its rows.
             excluded = QTableWidgetItem()
-            if is_word or is_excel:
+            if is_word or is_pptx or is_excel:
                 excluded.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 if is_word:
                     is_excluded = row < len(self.word_decisions) and self.word_decisions[row].excluded
+                elif is_pptx:
+                    is_excluded = row < len(self.pptx_decisions) and self.pptx_decisions[row].excluded
                 else:
                     is_excluded = finding.excluded
                 excluded.setCheckState(Qt.Checked if is_excluded else Qt.Unchecked)
@@ -612,6 +684,8 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 self.table.blockSignals(False)
         if self.is_word_source():
             self._refresh_word_row_status(row)
+        elif self.is_pptx_source():
+            self._refresh_pptx_row_status(row)
         elif isinstance(self.processor, ExcelPrivacyProcessor):
             self._refresh_excel_row_status(row)
         elif isinstance(self.processor, PdfPrivacyProcessor):
@@ -697,6 +771,35 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             self._refresh_row_highlight(row, self._is_unresolved_row(self.findings[row], is_word=True, is_excel=False))
         self.table.blockSignals(False)
 
+    def _refresh_pptx_row_status(self, row: int) -> None:
+        if row >= len(self.pptx_decisions):
+            return
+        enabled_item = self.table.item(row, 0)
+        excluded_item = self.table.item(row, 1)
+        decision = self.pptx_decisions[row]
+        decision.enabled = enabled_item is not None and enabled_item.checkState() == Qt.Checked
+        decision.excluded = bool(
+            excluded_item is not None and excluded_item.checkState() == Qt.Checked and not decision.enabled
+        )
+        status = pptx_finding_status(decision)
+        if row < len(self.findings):
+            self.findings[row].enabled = decision.enabled
+            # pptx_finding_status() is re-derived from `decision` on every
+            # call rather than stored anywhere, so keep the Finding's own
+            # detection_kind (read by _is_unresolved_row for the row
+            # highlight) in sync too instead of only updating the cell text.
+            self.findings[row].detection_kind = status
+        self.table.blockSignals(True)
+        status_item = self.table.item(row, 5)
+        if status_item is not None:
+            status_item.setText(status)
+        reason_item = self.table.item(row, 8)
+        if reason_item is not None:
+            reason_item.setText(pptx_finding_reason(decision))
+        if row < len(self.findings):
+            self._refresh_row_highlight(row, self._is_unresolved_row(self.findings[row], is_word=False, is_excel=False, is_pptx=True))
+        self.table.blockSignals(False)
+
     def toggle_selected(self) -> None:
         rows = sorted({index.row() for index in self.table.selectedIndexes()})
         for row in rows:
@@ -743,8 +846,21 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
     def is_word_source(self) -> bool:
         return self.source_path is not None and self.source_path.suffix.lower() in WORD_EXTENSIONS
 
+    def is_pptx_source(self) -> bool:
+        return self.source_path is not None and self.source_path.suffix.lower() in PPTX_EXTENSIONS
+
     def _sync_word_decisions_from_findings(self) -> None:
         for row, (decision, finding) in enumerate(zip(self.word_decisions, self.findings)):
+            decision.enabled = finding.enabled
+            excluded_item = self.table.item(row, 1)
+            decision.excluded = bool(
+                excluded_item is not None and excluded_item.checkState() == Qt.Checked and not decision.enabled
+            )
+            if finding.replacement.strip():
+                decision.replacement = finding.replacement.strip()
+
+    def _sync_pptx_decisions_from_findings(self) -> None:
+        for row, (decision, finding) in enumerate(zip(self.pptx_decisions, self.findings)):
             decision.enabled = finding.enabled
             excluded_item = self.table.item(row, 1)
             decision.excluded = bool(
