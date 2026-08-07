@@ -17,6 +17,7 @@ ocr_quality_outputs/
 pdf_ocr_test_outputs/
 word_holdout_private/
 *.pdf
+*.pptx
 *.log
 *.lnk
 ocr_check_result.txt
