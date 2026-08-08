@@ -9,10 +9,11 @@ import fitz
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from excel_privacy_cleaner.excel_processor import ProcessingOptions  # noqa: E402
-from excel_privacy_cleaner.pdf_ocr_support import CANDIDATE_REVIEW, USER_REJECTED  # noqa: E402
+from excel_privacy_cleaner.pdf_ocr_support import CANDIDATE_REVIEW, USER_REJECTED, ocr_line_word_spans  # noqa: E402
 from excel_privacy_cleaner.pdf_processor import (  # noqa: E402
     PDF_ASSISTANCE_NOTICE,
     PdfPrivacyProcessor,
+    _best_ocr_rect_near,
     pdf_review_state_path,
 )
 
@@ -246,6 +247,62 @@ def test_pdf_cross_page_literal_propagation() -> None:
     print("pdf_cross_page_literal_propagation_tests=passed")
 
 
+def test_pdf_same_page_literal_propagation() -> None:
+    # Reproduces a real holdout-review finding: the propagation pass used
+    # to skip a whole page once it already had *any* finding for a given
+    # literal text, on the assumption that per-span detection would
+    # independently catch every occurrence within the same page. In a real
+    # holdout PDF, a document's title repeated an organization name that
+    # was only independently detected in the body text further down the
+    # very same page -- the title's copy of the same text was never
+    # propagated to and stayed unredacted. Propagation must fill in a
+    # missing same-page occurrence too, without duplicating the one that
+    # was already found.
+    with tempfile.TemporaryDirectory(prefix="pdf_same_page_propagation_test_") as tmp:
+        source = Path(tmp) / "sample.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Re: Yamada Taro Steering Committee", fontsize=12)
+        page.insert_text((72, 96), "Reference notes: Yamada Taro entry", fontsize=12)
+        doc.save(source)
+        doc.close()
+
+        processor = PdfPrivacyProcessor()
+        findings = processor.scan(source, options=ProcessingOptions(mode="analysis"))
+        matches = [finding for finding in findings if finding.original == "Yamada Taro"]
+        assert_true(len(matches) == 2, "Both same-page occurrences should be detected independently in this fixture")
+
+        # Simulate the exact real-world gap: only one of the two same-page
+        # occurrences was independently detected -- drop the other, then
+        # re-run propagation directly, the same way scan() does internally.
+        keep, drop = matches
+        findings.remove(drop)
+        processor.locations.pop((drop.sheet, drop.cell, drop.original), None)
+
+        seen = {finding.dedupe_key for finding in findings}
+        fresh_doc = fitz.open(processor.temp_pdf)
+        try:
+            processor._propagate_known_literals_across_pages(fresh_doc, findings, seen)
+        finally:
+            fresh_doc.close()
+
+        restored = [finding for finding in findings if finding.original == "Yamada Taro"]
+        assert_true(
+            len(restored) == 2,
+            f"Propagation should recreate the missing same-page occurrence without duplicating the surviving one, got {len(restored)}",
+        )
+        assert_true(
+            any(finding.cell == keep.cell for finding in restored),
+            "The originally-detected occurrence should still be present, unduplicated",
+        )
+        assert_true(
+            any(finding.cell != keep.cell for finding in restored),
+            "The missing same-page occurrence should have been recreated at its own location",
+        )
+
+    print("pdf_same_page_literal_propagation_tests=passed")
+
+
 def test_pdf_output_validation_scoped_to_each_findings_own_location() -> None:
     # Reproduces the "LCS" report: the same short string was approved for
     # redaction at one location but deliberately rejected (kept as-is) at
@@ -299,6 +356,191 @@ def test_pdf_output_validation_scoped_to_each_findings_own_location() -> None:
         assert_true("090-1111-2222" in page2_text, "Rejected occurrence on page 2 should remain untouched")
 
     print("pdf_output_validation_scoped_to_each_findings_own_location_tests=passed")
+
+
+def test_pdf_text_mode_company_marker_detection() -> None:
+    # Reproduces a real holdout-review finding: text-layer PDF pages have no
+    # deterministic company-name detector -- 会社名 there comes entirely from
+    # GiNZA's statistical NER, which inconsistently misses real company names
+    # that carry an explicit legal-entity marker. In one holdout document,
+    # "丸安ニット㈱", "新東㈱", "㈱フラクタ" and "㈱カネコ小兵製陶所" were left
+    # completely unredacted while "㈱長良園" right next to them was caught.
+    # A marker-anchored regex (㈱/㈲/株式会社/有限会社/合同会社) closes that
+    # gap. This also guards the negative-lookahead stop-word list added after
+    # the fix's first pass over-matched into an adjoining person's name (no
+    # word spaces in Japanese means "カネコ小兵製陶所取締役会長伊藤克紀" has no
+    # natural boundary between the company and the next person's name).
+    with tempfile.TemporaryDirectory(prefix="pdf_company_marker_test_") as tmp:
+        source = Path(tmp) / "sample.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "中部ブロンズ倶楽部メンバーの自社プレゼン", fontsize=12, fontname="japan")
+        page.insert_text((72, 96), "丸安ニット㈱、新東㈱、山勝染工㈱", fontsize=12, fontname="japan")
+        page.insert_text((72, 120), "地域活性化パートナー・㈱フラクタ", fontsize=12, fontname="japan")
+        page.insert_text((72, 144), "㈱カネコ小兵製陶所取締役会長伊藤克紀", fontsize=12, fontname="japan")
+        doc.save(source)
+        doc.close()
+
+        processor = PdfPrivacyProcessor()
+        findings = processor.scan(source, options=ProcessingOptions(mode="analysis"))
+        companies = {finding.original for finding in findings if finding.entity_type == "会社名"}
+
+        for expected in ("丸安ニット㈱", "新東㈱", "山勝染工㈱", "㈱フラクタ", "㈱カネコ小兵製陶所"):
+            assert_true(expected in companies, f"{expected} should be detected as a company")
+
+        # The stop-word lookahead must keep the company match from swallowing
+        # the adjoining person's title/name -- otherwise a dangling
+        # unredacted character fragment (e.g. a lone "紀") can survive.
+        assert_true(
+            "㈱カネコ小兵製陶所取締役会長伊藤克" not in companies,
+            "Company match should stop before the job title, not run into the next person's name",
+        )
+        names = {finding.original for finding in findings if finding.entity_type == "氏名"}
+        assert_true("伊藤克紀" in names, "The person's full name should still be detected on its own")
+
+    print("pdf_text_mode_company_marker_detection_tests=passed")
+
+
+def test_pdf_text_mode_recovers_given_name_split_into_its_own_span() -> None:
+    # Reproduces a real holdout-review finding: participant-list tables laid
+    # out as justified "姓　名(所属)" text get split by PyMuPDF into separate
+    # spans wherever there's a physical gap. GiNZA analyzes each span with
+    # zero surrounding context, so a confidently-detected surname ("細谷")
+    # has no bearing on the very next span ("宏氏") -- the given name is left
+    # completely unredacted right next to its own (redacted) surname.
+    with tempfile.TemporaryDirectory(prefix="pdf_split_given_name_test_") as tmp:
+        source = Path(tmp) / "sample.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "参加者名簿の一覧を以下に示します", fontsize=12, fontname="japan")
+        # Same line, small gap -- exactly the pattern the fix targets.
+        page.insert_text((72, 100), "細谷", fontsize=12, fontname="japan")
+        page.insert_text((110, 100), "宏氏", fontsize=12, fontname="japan")
+        # A complete "姓名" full name (4 chars) immediately followed by a job
+        # title on the same line, same small gap: this must NOT be treated
+        # as a split name -- a full name is not a bare surname waiting for
+        # its given name, so "事務局長" should never be captured as if it
+        # were one.
+        page.insert_text((72, 130), "伊藤克紀", fontsize=12, fontname="japan")
+        page.insert_text((140, 130), "事務局長", fontsize=12, fontname="japan")
+        doc.save(source)
+        doc.close()
+
+        processor = PdfPrivacyProcessor()
+        findings = processor.scan(source, options=ProcessingOptions(mode="analysis"))
+
+        given_name_findings = [finding for finding in findings if finding.original == "宏"]
+        assert_true(len(given_name_findings) == 1, "The split-off given name should be recovered")
+        assert_true(
+            given_name_findings[0].detection_kind == CANDIDATE_REVIEW,
+            "A geometry-inferred given name should require review, not auto-apply",
+        )
+        assert_true(
+            not any(finding.original == "事務局長" for finding in findings),
+            "A job title after a complete full name must not be mistaken for a split given name",
+        )
+        assert_true(
+            any(finding.original == "伊藤克紀" for finding in findings),
+            "The complete full name should still be detected normally",
+        )
+
+    print("pdf_text_mode_recovers_given_name_split_into_its_own_span_tests=passed")
+
+
+def test_ocr_line_word_spans_groups_words_by_line() -> None:
+    words = [
+        (0.0, 0.0, 10.0, 10.0, "中部", 0, 0, 0),
+        (10.0, 0.0, 20.0, 10.0, "ブロンズ", 0, 0, 1),
+        (0.0, 20.0, 10.0, 30.0, "次第", 1, 0, 0),
+    ]
+    lines = ocr_line_word_spans(words)
+    assert_true(len(lines) == 2, "Words on different (block, line) keys should form separate lines")
+
+    first_text, first_spans = lines[0]
+    assert_true(first_text == "中部ブロンズ", "Same-line words should concatenate in reading order")
+    assert_true(
+        [span[:2] for span in first_spans] == [(0, 2), (2, 6)],
+        "Each word should keep its own start/end offset within the concatenated line text",
+    )
+    assert_true(first_spans[0][2] == (0.0, 0.0, 10.0, 10.0), "Each span should keep the word's own rect, not a subdivision")
+
+    second_text, _ = lines[1]
+    assert_true(second_text == "次第", "A word on a different line should not merge into the first line's text")
+
+    print("ocr_line_word_spans_groups_words_by_line_tests=passed")
+
+
+def test_best_ocr_rect_near_fixes_the_observed_clipped_character() -> None:
+    # Reproduces the real failure this whole rect-refinement feature exists
+    # to fix, using the actual OCR word Tesseract recognized for the
+    # affected row of a real holdout PDF: the embedded (invisible,
+    # GlyphLessFont) text layer's own per-character position estimate for
+    # "伊藤克紀" put the last character ("紀") ~12pt to the left of where it
+    # actually sits in the scanned image, so a black box placed at that
+    # estimate left the real "紀" glyph fully exposed. Tesseract's own word
+    # box for this same text, unlike the embedded layer's synthetic
+    # per-character subdivision, is a value it actually measured against
+    # the rendered image, and must fully cover the target once matched.
+    words = [
+        (78.46, 462.87, 208.99, 478.24, "・事務局長伊藤克紀(", 10, 0, 0),
+        (211.88, 462.87, 315.50, 478.24, "常カネコ小兵製陶所)", 10, 0, 1),
+    ]
+    lines = ocr_line_word_spans(words)
+    # The embedded layer's own (clipped-short) rect for this finding, per
+    # the real document: right edge at 185.17 -- short of "紀"'s real
+    # position (it visually starts around x=183-186 in the source image).
+    near = (138.60, 463.32, 185.17, 475.21)
+
+    rect = _best_ocr_rect_near(lines, "伊藤克紀", near)
+    assert_true(rect is not None, "伊藤克紀 should resolve to a rect")
+    assert_true(
+        rect[2] >= 208.99 - 2,
+        f"The refined rect must reach at least as far right as the OCR word containing '紀', got {rect}",
+    )
+
+    print("best_ocr_rect_near_fixes_the_observed_clipped_character_tests=passed")
+
+
+def test_best_ocr_rect_near_rejects_implausible_height_and_distant_matches() -> None:
+    # A same-text match can legitimately repeat elsewhere on the page, and
+    # a repeat several inches away must not be mistaken for the occurrence
+    # this specific finding refers to. Likewise, a candidate whose OCR word
+    # spans an implausible height for a single line (e.g. Tesseract merged
+    # in an adjacent line) must be discarded even if its center is close --
+    # accepting it can miss the real target text entirely (the same failure
+    # mode test_best_ocr_rect_near_unions_merged_ocr_word_tests guards from
+    # the opposite direction).
+    near = (100.0, 100.0, 130.0, 112.0)  # a plausible single 12pt-tall line
+
+    # Bad candidate: same target text, physically close, but its OCR word's
+    # height (60pt) is nothing like a single line -- must be rejected.
+    bad_words = [(90.0, 90.0, 140.0, 150.0, "テスト", 0, 0, 0)]
+    bad_lines = ocr_line_word_spans(bad_words)
+    assert_true(
+        _best_ocr_rect_near(bad_lines, "テスト", near) is None,
+        "An implausibly tall OCR word must not be accepted just for being nearby",
+    )
+
+    # Good candidate: same target text, plausible line height, but ~400pt
+    # away -- farther than the same-line/area tolerance, so it must not be
+    # mistaken for the occurrence near this finding's original location.
+    far_words = [(500.0, 500.0, 530.0, 512.0, "テスト", 0, 0, 0)]
+    far_lines = ocr_line_word_spans(far_words)
+    assert_true(
+        _best_ocr_rect_near(far_lines, "テスト", near) is None,
+        "A same-text repeat far from the finding's approximate location must not be snapped to",
+    )
+
+    # With both candidates present plus a genuinely close, plausible one,
+    # the close+plausible candidate must win over the closer-but-implausible
+    # one -- proximity alone is not enough.
+    good_words = [(140.0, 100.0, 170.0, 112.0, "テスト", 0, 1, 0)]
+    combined_lines = ocr_line_word_spans(bad_words + good_words)
+    rect = _best_ocr_rect_near(combined_lines, "テスト", near)
+    assert_true(rect is not None, "The plausible candidate should be found")
+    assert_true(rect[0] > 135.0, f"The implausibly-tall closer candidate must be skipped in favor of the plausible one, got {rect}")
+
+    print("best_ocr_rect_near_rejects_implausible_height_and_distant_matches_tests=passed")
 
 
 if __name__ == "__main__":
