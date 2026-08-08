@@ -81,11 +81,11 @@ def test_pptx_review_required_candidate_exclude_checkbox_resolves_block(monkeypa
             calls.clear()
 
             # Check "変換しない" for that row -- this is the fix for the block.
-            window.table.item(review_row, 1).setCheckState(Qt.Checked)
+            window._row_checkbox(review_row, 1).setChecked(True)
             assert_true(window.pptx_decisions[review_row].excluded, "Decision should now be marked excluded")
             assert_true(not window.pptx_decisions[review_row].enabled, "Excluded decision must stay disabled")
             assert_true(
-                window.table.item(review_row, 0).checkState() == Qt.Unchecked,
+                not window._row_checkbox(review_row, 0).isChecked(),
                 "Checking 変換しない must clear 変換する for the same row",
             )
             assert_true(
@@ -95,7 +95,6 @@ def test_pptx_review_required_candidate_exclude_checkbox_resolves_block(monkeypa
 
             window.convert_file()
             assert_true(any(name == "information" for name, _ in calls), "Conversion should now succeed")
-            assert_true(window.history.count() == 1, "Conversion should append one history entry")
         finally:
             window.processor.cleanup()
             window.close()

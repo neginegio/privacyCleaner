@@ -51,6 +51,7 @@ from .pdf_ocr_support import (
     VERIFICATION_TEXT_RESIDUAL_PASS,
     detect_ocr_candidates,
     evaluate_page_quality,
+    ocr_line_word_spans,
 )
 from .presidio_japanese import JapanesePresidioDetector, alias_kind, entity_label, normalize_alias_key
 from .resources import resource_path
@@ -237,7 +238,7 @@ class PdfPrivacyProcessor:
                         self.page_quality[page_index] = evaluate_page_quality(page, "", [], [], exception=str(exc))
                         self._initialize_page_state(page_index)
                         continue
-                for span_text, bbox, char_bboxes in text_spans:
+                for span_index, (span_text, bbox, char_bboxes) in enumerate(text_spans):
                     if not span_text.strip():
                         continue
                     occupied: list[range] = []
@@ -335,7 +336,10 @@ class PdfPrivacyProcessor:
                         self._append_finding(findings, seen, finding)
                         occupied.append(match_range)
 
+                    self._complete_split_given_name(findings, seen, page_label, page_index, text_spans, span_index)
+
             self._propagate_known_literals_across_pages(doc, findings, seen)
+            self._refine_scanned_page_rects_with_ocr(doc, findings)
         finally:
             doc.close()
         return findings
@@ -346,24 +350,39 @@ class PdfPrivacyProcessor:
         findings: list[Finding],
         seen: set[tuple[str, str, str, str, str]],
     ) -> None:
-        """Catch exact repeats, on other pages, of a name/company/etc. already
-        found somewhere in the document.
+        """Catch exact repeats, anywhere else in the document, of a
+        name/company/etc. already found somewhere in the document.
 
-        A name confidently detected on one page (mainly via GiNZA, which --
+        A name confidently detected once (mainly via GiNZA, which --
         unlike the regex/Presidio "known_family_names" surname pass above --
-        has no cross-page propagation) can appear verbatim elsewhere without
+        has no propagation of its own) can appear verbatim elsewhere without
         independently triggering any detection rule there, e.g. a company
         name introduced once with clear context ("取引先: 比良タイヤ工業所")
-        then repeated later in a plain list with no surrounding cue. Left
-        alone, approving the one detected occurrence still leaves the others
-        unredacted, which the post-output residual-text check correctly
-        flags as a failure. Scoped to text-layer pages only (OCR pages run
-        their own separate candidate pipeline).
+        then repeated later in a plain list with no surrounding cue, or a
+        document title repeating an organization name a body-text mention
+        of it elsewhere already triggered on. Left alone, approving the one
+        detected occurrence still leaves the others unredacted, which the
+        post-output residual-text check correctly flags as a failure.
+        Scoped to text-layer pages only (OCR pages run their own separate
+        candidate pipeline).
+
+        Dedup is by geometric rect overlap against every already-known
+        location for that exact text (both original detections and
+        previously-propagated ones), not by "this page already has a
+        finding for this text" -- that coarser check would also skip
+        genuinely different, still-unredacted occurrences of the same text
+        elsewhere on the *same* page (e.g. a title repeating a name found
+        only in the body text further down), which is exactly the gap a
+        real holdout PDF's document title exposed: only the body-text
+        occurrence was independently detected, and the page-level skip then
+        left the title's copy of the same organization name unredacted.
         """
         propagation_targets: dict[str, tuple[str, str]] = {}
-        flagged_pages: dict[str, set[str]] = {}
+        existing_rects: dict[str, list[tuple[int, tuple[float, float, float, float]]]] = {}
         for finding in findings:
-            flagged_pages.setdefault(finding.original, set()).add(finding.sheet)
+            location = self.locations.get((finding.sheet, finding.cell, finding.original))
+            if location is not None:
+                existing_rects.setdefault(finding.original, []).append((location.page_index, location.rect))
             if finding.entity_type in {"氏名", "会社名", "住所", "銀行名"} and len(finding.original) >= 3:
                 propagation_targets.setdefault(finding.original, (finding.entity_type, finding.replacement))
         if not propagation_targets:
@@ -379,11 +398,15 @@ class PdfPrivacyProcessor:
                     continue
                 occupied: list[range] = []
                 for original, (entity_type, replacement) in propagation_targets.items():
-                    if page_label in flagged_pages.get(original, set()) or original not in span_text:
+                    if original not in span_text:
                         continue
                     for match in re.finditer(re.escape(original), span_text):
                         match_range = range(match.start(), match.end())
                         if any(match_range.start < item.stop and item.start < match_range.stop for item in occupied):
+                            continue
+                        occupied.append(match_range)
+                        candidate_rect = _substring_rect(bbox, span_text, match.start(), match.end(), char_bboxes)
+                        if _rect_already_covered(page_index, candidate_rect, existing_rects.get(original, ())):
                             continue
                         new_finding = self._make_finding(
                             enabled=False,
@@ -397,12 +420,152 @@ class PdfPrivacyProcessor:
                             detection_kind=CANDIDATE_REVIEW,
                             original=match.group(0),
                             replacement=replacement,
-                            reason=f"document_propagation: 同一文書内の他ページで検出済みの文字列「{original}」と完全一致。信頼度=MEDIUM",
+                            reason=f"document_propagation: 同一文書内の他の箇所で検出済みの文字列「{original}」と完全一致。信頼度=MEDIUM",
                             char_bboxes=char_bboxes,
                         )
                         self._append_finding(findings, seen, new_finding)
-                        occupied.append(match_range)
-                        flagged_pages.setdefault(original, set()).add(page_label)
+                        existing_rects.setdefault(original, []).append((page_index, candidate_rect))
+
+    def _refine_scanned_page_rects_with_ocr(self, doc: Any, findings: list[Finding]) -> None:
+        """Re-derive redaction rects for scanned pages whose embedded text
+        layer is itself an invisible OCR overlay with unreliable positions.
+
+        Some scanned-and-OCR'd PDFs embed a "GlyphLessFont" text layer
+        (invisible; present only for copy/search) whose per-character boxes
+        are a *estimate* -- often the scanning software's own OCR only
+        measured a whole word's box, then evenly subdivided it per
+        character. When the real glyphs in the underlying image are spaced
+        differently than that even split assumes (e.g. a name field with an
+        internal gap), the estimate drifts further off the real glyph
+        position the further into the run you go: in one holdout PDF, the
+        4th character of a 4-character name was reported ~12pt to the left
+        of where it actually sits in the image, so its "correctly detected"
+        redaction rect missed the visible glyph entirely.
+
+        Detection stays on the embedded text layer (GiNZA/regex recall is
+        good there). Only the redaction *rect* is replaced here, with one
+        grounded in this page's own independently-run OCR pass over the
+        rendered image -- self-consistent by construction, since that OCR
+        pass measures the same image the black box will be drawn onto.
+
+        The replacement rect is built at OCR *word* granularity (see
+        ocr_line_word_spans), not by evenly subdividing a word's box per
+        character -- that subdivision is exactly the kind of estimate that
+        caused the embedded layer's drift in the first place, and
+        Tesseract's own word segmentation for Japanese routinely merges
+        several semantic words into one recognized token (observed on a
+        real document: a full 27-character sentence recognized as a single
+        "word"), which makes even OUR OWN subdivision drift just as badly.
+        Using each word's own directly-measured bbox trades a small amount
+        of over-redaction (the rect can extend slightly past the target
+        substring to the edges of the OCR word(s) it falls within) for a
+        hard guarantee that the target text itself is never left exposed --
+        the correct tradeoff for a privacy tool.
+        """
+        if _ocr_runtime_error() is not None:
+            return
+        for page_index in range(doc.page_count):
+            if self.page_modes.get(page_index) != "text":
+                continue
+            page = doc[page_index]
+            if not _page_needs_ocr_rect_fallback(page):
+                continue
+            page_label = f"ページ{page_index + 1}"
+            page_findings = [finding for finding in findings if finding.sheet == page_label]
+            if not page_findings:
+                continue
+            try:
+                _, ocr_words = ocr_page_text_and_words(page)
+            except Exception:
+                continue
+            lines = ocr_line_word_spans(ocr_words)
+            if not lines:
+                continue
+            for finding in page_findings:
+                key = (finding.sheet, finding.cell, finding.original)
+                current = self.locations.get(key)
+                if current is None:
+                    continue
+                refined = _best_ocr_rect_near(lines, finding.original, current.rect)
+                if refined is not None:
+                    self.locations[key] = PdfLocation(page_index, refined)
+
+    def _complete_split_given_name(
+        self,
+        findings: list[Finding],
+        seen: set[tuple[str, str, str, str, str]],
+        page_label: str,
+        page_index: int,
+        text_spans: list[tuple[str, tuple[float, float, float, float], tuple[tuple[float, float, float, float], ...]]],
+        span_index: int,
+    ) -> None:
+        """Recover a given name PyMuPDF split off into its own text span.
+
+        Participant-list tables in some documents lay out each row as
+        justified "姓　名(所属)" text with real physical gaps between the
+        surname and given name, which PyMuPDF's rawdict extraction turns
+        into separate spans (e.g. holdout PDF spans "細谷" then "宏氏", or
+        "浜野" then "駿"). A surname confidently detected in the first span
+        (mainly via GiNZA) has no bearing on the very next span, which GiNZA
+        sees with zero surrounding context and never recognizes as a
+        person's given name -- "駿" alone is even below the length floor the
+        GiNZA loop above applies. If the current span was consumed *in
+        full* as a person's name, and the immediately following span --
+        after stripping an optional trailing "(...)" aside and honorific --
+        is just 1-4 kanji, it is almost certainly that same person's given
+        name.
+        """
+        if span_index + 1 >= len(text_spans):
+            return
+        current_text, current_bbox, _ = text_spans[span_index]
+        current_text = current_text.strip()
+        # Longer than a plausible bare surname (e.g. an already-complete
+        # "姓名" full name like "伊藤克紀") -- a trailing job title or
+        # closing-remarks label on the next line can coincidentally also be
+        # 1-4 kanji, so this alone isn't decisive; the line/gap check below
+        # is what actually rules those cases out, this just narrows the
+        # search to spans that look like a bare surname to begin with.
+        if not current_text or len(current_text) > 3:
+            return
+        if not any(
+            finding.sheet == page_label and finding.entity_type == "氏名" and finding.original == current_text
+            for finding in findings
+        ):
+            return
+        next_text, next_bbox, next_char_bboxes = text_spans[span_index + 1]
+        # Require the next span to sit immediately to the right on the same
+        # line (small horizontal gap, matching y-range) -- otherwise this is
+        # just the next line/section of the page, not a continuation of the
+        # same name split apart by justified spacing.
+        same_line = abs(current_bbox[1] - next_bbox[1]) < 2.0 and abs(current_bbox[3] - next_bbox[3]) < 2.0
+        gap = next_bbox[0] - current_bbox[2]
+        if not same_line or not (0 <= gap <= 30):
+            return
+        if any(
+            finding.sheet == page_label and finding.original == next_text.strip()
+            for finding in findings
+        ):
+            return
+        given_name = _leading_given_name_fragment(next_text)
+        if given_name is None:
+            return
+        replacement = replacement_for("name", given_name, self.alias_book, self.options)
+        finding = self._make_finding(
+            enabled=False,
+            page_label=page_label,
+            page_index=page_index,
+            bbox=next_bbox,
+            span_text=next_text,
+            start=0,
+            end=len(given_name),
+            entity_type="氏名候補",
+            detection_kind=CANDIDATE_REVIEW,
+            original=given_name,
+            replacement=replacement,
+            reason=f"直前のスパンで検出済みの氏名「{current_text}」に隣接する断片のため要確認",
+            char_bboxes=next_char_bboxes,
+        )
+        self._append_finding(findings, seen, finding)
 
     def convert_with_artifacts(
         self,
@@ -1379,7 +1542,167 @@ def _pdf_extra_results(text: str) -> list[tuple[int, int, str]]:
     ):
         for match in re.finditer(pattern, text):
             results.append((match.start(1), match.end(1), "PDF_ENGLISH_NAME"))
+    results.extend(_pdf_company_marker_results(text))
     return results
+
+
+# Text-layer PDF pages have no deterministic company-name detector -- unlike
+# OCR pages (pdf_context_rules.py's marker-based rules), 会社名 there comes
+# entirely from GiNZA's statistical NER, which inconsistently misses real
+# company names that carry an explicit legal-entity marker (e.g. "丸安ニット
+# ㈱", "㈱フラクタ" were left completely unredacted in a holdout PDF while
+# "㈱長良園" right next to them was caught). A marker-anchored regex closes
+# that gap without touching the GiNZA/Presidio pipeline other detectors rely
+# on: _append_pdf_finding's overlap check means this only fills in spans no
+# other detector already claimed.
+# Japanese text has no word spaces, so a company name directly followed by a
+# job title/honorific (no separator, e.g. "カネコ小兵製陶所取締役会長伊藤克紀")
+# would otherwise let the greedy character-class run straight through the
+# title into the next person's name. The negative lookahead stops the run
+# right before any of these words so the match ends at the company name.
+_COMPANY_RUN_STOP_WORDS = (
+    "取締役", "代表", "社長", "会長", "副会長", "事務局長", "理事長", "理事",
+    "課長", "部長", "次長", "室長", "主幹", "主任", "審議役", "専務", "常務",
+    "支店長", "工場長", "様", "さん", "殿", "氏",
+)
+_COMPANY_RUN_CHAR = rf"(?:(?!{'|'.join(_COMPANY_RUN_STOP_WORDS)})[一-龯々〆ヵヶぁ-んァ-ヶーA-Za-z0-9])"
+_COMPANY_NAME_RUN = rf"{_COMPANY_RUN_CHAR}{{2,16}}"
+_COMPANY_MARKER_SUFFIX = r"(?:㈱|㈲|\(株\)|\(有\)|（株）|（有）)"
+_COMPANY_MARKER_PREFIX = r"(?:株式会社|有限会社|合同会社|㈱|㈲|\(株\)|\(有\)|（株）|（有）)"
+
+
+def _pdf_company_marker_results(text: str) -> list[tuple[int, int, str]]:
+    results: list[tuple[int, int, str]] = []
+    for match in re.finditer(rf"{_COMPANY_NAME_RUN}{_COMPANY_MARKER_SUFFIX}", text):
+        results.append((match.start(), match.end(), "JP_COMPANY"))
+    for match in re.finditer(rf"{_COMPANY_MARKER_PREFIX}{_COMPANY_NAME_RUN}", text):
+        results.append((match.start(), match.end(), "JP_COMPANY"))
+    return results
+
+
+def _rect_already_covered(
+    page_index: int,
+    candidate: tuple[float, float, float, float],
+    existing: tuple[tuple[int, tuple[float, float, float, float]], ...] | list[tuple[int, tuple[float, float, float, float]]],
+) -> bool:
+    """Is candidate the same on-page occurrence as one already recorded?
+
+    Used to dedupe document-wide literal propagation against both the
+    original detections and earlier propagated findings, at the geometric
+    granularity of "does this rect actually overlap an existing one on the
+    same page" rather than "does this page already have any finding for
+    this text" -- the latter would also suppress a genuinely different,
+    still-unredacted occurrence of the same text elsewhere on that page.
+    """
+    cx0, cy0, cx1, cy1 = candidate
+    for existing_page_index, rect in existing:
+        if existing_page_index != page_index:
+            continue
+        rx0, ry0, rx1, ry1 = rect
+        if cx0 < rx1 and rx0 < cx1 and cy0 < ry1 and ry0 < cy1:
+            return True
+    return False
+
+
+def _page_needs_ocr_rect_fallback(page: Any) -> bool:
+    """A scanned page whose embedded text is an invisible OCR overlay.
+
+    Scoped to pages that are *both* (a) tagged with a GlyphLessFont --
+    third-party scan/OCR software's standard way of marking an invisible,
+    position-approximate text layer meant only for copy/search, not visual
+    rendering -- and (b) mostly covered by a raster image, i.e. the visible
+    content is a scanned photo/photocopy, not native PDF text. Digitally
+    authored PDFs that happen to embed a glyphless font for an unrelated
+    small element (an icon, a watermark) won't have (b) and are left alone.
+    """
+    try:
+        fonts = page.get_fonts(full=True)
+    except Exception:
+        return False
+    if not any("glyphless" in str(font[3]).lower() for font in fonts):
+        return False
+    try:
+        infos = page.get_image_info()
+    except Exception:
+        return False
+    image_area = 0.0
+    for info in infos:
+        bbox = info.get("bbox")
+        if not bbox:
+            continue
+        x0, y0, x1, y1 = bbox
+        image_area += max(x1 - x0, 0) * max(y1 - y0, 0)
+    page_area = max(float(page.rect.width) * float(page.rect.height), 1.0)
+    return (image_area / page_area) >= 0.5
+
+
+def _best_ocr_rect_near(
+    lines: tuple[tuple[str, tuple[tuple[int, int, tuple[float, float, float, float]], ...]], ...],
+    target: str,
+    near: tuple[float, float, float, float],
+) -> tuple[float, float, float, float] | None:
+    """Find target's rect in an independently-OCR'd page, picking whichever
+    occurrence sits closest to the (possibly imprecise) embedded-layer rect.
+
+    Each match's rect is the *union* of the whole OCR word(s) the matched
+    character range overlaps -- see ocr_line_word_spans for why: per-word
+    boxes are Tesseract's own directly-measured values, and subdividing a
+    word's box evenly per character (the same estimate that caused the
+    embedded layer's drift in the first place) drifts just as badly on a
+    word Tesseract merged from several semantic tokens.
+
+    The same string can legitimately repeat elsewhere on the page (a name
+    mentioned twice), so proximity to the original approximate location is
+    what disambiguates which occurrence this specific finding refers to --
+    not just "first match". A generous but bounded distance cap avoids
+    snapping to a same-text repeat on a different line or elsewhere on the
+    page when OCR simply failed to recognize this particular occurrence.
+    A candidate whose unioned height is a poor match for the original
+    embedded-layer line height is discarded even if its center is close --
+    a backstop against a run of merged OCR words pulling in an adjacent
+    line. This cutoff is a real tradeoff, not a clean boundary: loosening
+    it recovers some legitimate matches whose measured line height varies
+    more from the embedded layer's than expected (observed: a correct
+    match rejected at ratio ~1.52), but a merged-word false match observed
+    on a real document had a very similar ratio (~1.55) and relied on this
+    guard, not just the distance cap, to be excluded -- past a certain
+    looseness there stops being a height cutoff that separates them at all.
+    """
+    if not target:
+        return None
+    near_cx = (near[0] + near[2]) / 2
+    near_cy = (near[1] + near[3]) / 2
+    near_height = max(near[3] - near[1], 1.0)
+    pad = 1.5
+    best: tuple[float, float, float, float] | None = None
+    best_dist = None
+    for line_text, spans in lines:
+        if not spans:
+            continue
+        start = 0
+        while True:
+            index = line_text.find(target, start)
+            if index == -1:
+                break
+            end = index + len(target)
+            overlapping = [rect for span_start, span_end, rect in spans if span_start < end and index < span_end]
+            if overlapping:
+                left = min(rect[0] for rect in overlapping)
+                top = min(rect[1] for rect in overlapping)
+                right = max(rect[2] for rect in overlapping)
+                bottom = max(rect[3] for rect in overlapping)
+                height = max(bottom - top, 1.0)
+                if 0.5 <= height / near_height <= 1.4:
+                    cx = (left + right) / 2
+                    cy = (top + bottom) / 2
+                    dist = (cx - near_cx) ** 2 + (cy - near_cy) ** 2
+                    if best_dist is None or dist < best_dist:
+                        best_dist = dist
+                        best = (left - pad, top - pad, right + pad, bottom + pad)
+            start = index + 1
+    if best is not None and best_dist is not None and best_dist <= 60.0**2:
+        return best
+    return None
 
 
 def _substring_rect(
@@ -1459,6 +1782,18 @@ def _sensitive_originals(findings: list[Finding]) -> list[str]:
         and len(finding.original) >= 3
     }
     return sorted(values, key=len, reverse=True)
+
+
+_GIVEN_NAME_TRAILING_ASIDE_RE = re.compile(r"[（(].*?[）)]\s*[×xX]?\s*$")
+_GIVEN_NAME_TRAILING_HONORIFIC_RE = re.compile(r"(?:様|さん|殿|氏)\s*$")
+
+
+def _leading_given_name_fragment(text: str) -> str | None:
+    trimmed = _GIVEN_NAME_TRAILING_ASIDE_RE.sub("", text.strip())
+    trimmed = _GIVEN_NAME_TRAILING_HONORIFIC_RE.sub("", trimmed).strip()
+    if re.fullmatch(r"[一-龯々〆ヵヶ]{1,4}", trimmed):
+        return trimmed
+    return None
 
 
 def _surname_candidate(value: str) -> str | None:

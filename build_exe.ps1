@@ -10,7 +10,11 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 
 & $venvPython -m pip install --disable-pip-version-check -r requirements.txt
 & $venvPython .\tools\generate_app_icon.py
-.\.venv\Scripts\pyinstaller.exe `
+# Invoked as "python -m PyInstaller" rather than the .venv\Scripts\pyinstaller.exe
+# launcher: that launcher fails silently (exit code 1, no output at all, even on
+# --version) when the venv lives under a path containing non-ASCII characters,
+# as this project's OneDrive path does ("ドキュメント").
+& $venvPython -m PyInstaller `
     --noconfirm `
     --clean `
     --windowed `
