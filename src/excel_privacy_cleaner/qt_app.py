@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QListWidget,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -99,6 +98,51 @@ def display_detection_kind(value: str) -> str:
 # Same highlight color used by the PDF candidate review dialog's "未確認" rows.
 UNRESOLVED_ROW_COLOR = QColor("#fef3c7")
 
+# 出力ボタンを画面内で唯一のアクセント色付きボタンにして、ワークフローの
+# 最終ゴールであることを視覚的に示す。
+PRIMARY_BUTTON_STYLE = (
+    "QPushButton { background: #2563eb; color: white; font-weight: 600; padding: 6px 14px; border-radius: 4px; border: none; }"
+    " QPushButton:disabled { background: #cbd5e1; color: #64748b; }"
+    " QPushButton:hover:!disabled { background: #1d4ed8; }"
+)
+WARNING_BUTTON_STYLE = (
+    "QPushButton { background: #fef3c7; color: #92400e; font-weight: 600; padding: 6px 14px; border: 1px solid #f59e0b; border-radius: 4px; }"
+    " QPushButton:hover:!disabled { background: #fde68a; }"
+)
+
+
+class _CheckboxCell(QWidget):
+    """A checkbox centered in a table cell that toggles on a click anywhere
+    in the cell, not just the small native checkbox glyph.
+
+    QTableWidgetItem's built-in checkbox rendering doesn't honor
+    setTextAlignment(Qt.AlignCenter) for the check indicator's position in
+    this app's style, and only the indicator's own tiny native hit-rect
+    (near the cell's left edge) responds to clicks. Using a real QCheckBox
+    inside a centered layout fixes the positioning; making the checkbox
+    itself mouse-transparent and handling the click on this container
+    instead avoids the checkbox's own native click-to-toggle firing a
+    second time on top of ours when a click happens to land on the glyph.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.checkbox = QCheckBox(self)
+        self.checkbox.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.checkbox.setFocusPolicy(Qt.NoFocus)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addStretch(1)
+        layout.addWidget(self.checkbox)
+        layout.addStretch(1)
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.LeftButton and self.checkbox.isEnabled():
+            self.checkbox.toggle()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
 
 def asset_path(relative_path: str) -> Path:
     return resource_path(relative_path)
@@ -162,10 +206,19 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         self.business_secret_checkbox = QCheckBox("企業機密も変換する")
         self.scope_combo = QComboBox()
         self.pdf_redaction_combo = QComboBox()
-        self.pdf_review_button = QPushButton("PDF候補確認")
+        self.choose_button = QPushButton("匿名化したいファイルを選択")
+        self.scan_button = QPushButton("検査開始")
+        self.convert_button = QPushButton("匿名化したファイルを出力")
+        self.pdf_review_button = QPushButton("PDFページを確認")
+        self.pdf_review_button.setToolTip("PDFの各ページを1ページずつ確認しながら、候補を承認・却下します(PDF検査後に有効化)。")
+        self.settings_toggle_button = QPushButton()
+        self.settings_panel = QWidget()
         self.mode_note = QLabel("")
-        self.history = QListWidget()
+        self.summary_total_label = QLabel()
+        self.summary_unresolved_label = QLabel()
+        self.summary_target_label = QLabel()
         self.table = QTableWidget(0, 9)
+        self._settings_expanded = False
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -174,11 +227,75 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
 
-        title = QLabel("Excel / PDF / Word / PowerPoint ファイルを選択してください。検出はこの PC 内だけで行い、原本は上書きしません。")
+        title = QLabel("Excel / Word / PowerPoint / PDF ファイルを選択してください。検出はこの PC 内だけで行い、原本は上書きしません。")
         title.setStyleSheet("font-size: 15px; font-weight: 600;")
         layout.addWidget(title)
 
-        mode_row = QHBoxLayout()
+        file_row = QHBoxLayout()
+        file_row.addWidget(QLabel("ファイル:"))
+        file_row.addWidget(self.path_label, 1)
+        layout.addLayout(file_row)
+
+        # 主な操作は「選択 → 検査 → (PDFのみ)ページ確認 → 出力」の順に左から
+        # 並べ、まだ押せない段階のボタンは無効化する。どのボタンが今押せる
+        # かだけで次にすることが伝わるようにするため。
+        workflow_row = QHBoxLayout()
+        self.choose_button.setToolTip("検査するファイルを選択します(Excel/Word/PowerPoint/PDF)。")
+        self.scan_button.setToolTip("選択したファイルを検査し、個人情報・機密情報の候補を検出します。")
+        self.convert_button.setToolTip("承認済みの候補を匿名化して保存します。原本のファイルは上書きしません。")
+        self.choose_button.clicked.connect(self.choose_file)
+        self.scan_button.clicked.connect(self.scan_file)
+        self.convert_button.clicked.connect(self.convert_file)
+        self.scan_button.setEnabled(False)
+        self.convert_button.setEnabled(False)
+        self.convert_button.setStyleSheet(PRIMARY_BUTTON_STYLE)
+        self.pdf_review_button.clicked.connect(self.open_pdf_review)
+        self.pdf_review_button.setVisible(False)
+        workflow_row.addWidget(self.choose_button)
+        workflow_row.addWidget(self.scan_button)
+        workflow_row.addWidget(self.pdf_review_button)
+        workflow_row.addWidget(self.convert_button)
+        workflow_row.addStretch(1)
+        layout.addLayout(workflow_row)
+
+        action_row = QHBoxLayout()
+        all_button = QPushButton("すべて変換")
+        none_button = QPushButton("すべて除外")
+        export_csv_button = QPushButton("検出結果CSV出力")
+        all_button.setToolTip("検出された全ての候補の「変換する」をチェックします。")
+        none_button.setToolTip("検出された全ての候補の「変換する」を解除します。")
+        export_csv_button.setToolTip("現在の検出結果の一覧をCSVファイルとして保存します。")
+        all_button.clicked.connect(lambda: self.set_all_enabled(True))
+        none_button.clicked.connect(lambda: self.set_all_enabled(False))
+        export_csv_button.clicked.connect(self.export_findings_csv)
+        action_row.addWidget(all_button)
+        action_row.addWidget(none_button)
+        action_row.addWidget(export_csv_button)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
+
+        summary_row = QHBoxLayout()
+        for label, style in (
+            (self.summary_total_label, "background: #f8fafc; border: 1px solid #cbd5e1;"),
+            (self.summary_unresolved_label, "background: #fef3c7; border: 1px solid #f59e0b; color: #92400e;"),
+            (self.summary_target_label, "background: #f8fafc; border: 1px solid #cbd5e1;"),
+        ):
+            label.setStyleSheet(f"{style} padding: 6px 10px; border-radius: 4px;")
+            summary_row.addWidget(label)
+        summary_row.addStretch(1)
+        layout.addLayout(summary_row)
+        self._refresh_summary_counts()
+
+        # 処理設定(処理モード・仮名化範囲・企業機密・PDF匿名化方法)は普段は
+        # 折りたたみ、現在の設定を1行要約したボタンだけを表示する。各項目の
+        # 説明はツールチップに譲る。
+        self.settings_toggle_button.setFlat(True)
+        self.settings_toggle_button.setStyleSheet("QPushButton { text-align: left; color: #475569; } QPushButton:hover { color: #1e293b; }")
+        self.settings_toggle_button.clicked.connect(self._toggle_settings_panel)
+        layout.addWidget(self.settings_toggle_button)
+
+        settings_layout = QHBoxLayout(self.settings_panel)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
         self.mode_combo.addItem("分析継続用", "analysis")
         self.mode_combo.addItem("外部共有用", "external")
         self.scope_combo.addItem("このファイル内だけ", "file")
@@ -189,58 +306,49 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         self.business_secret_checkbox.setChecked(False)
         self.mode_combo.currentIndexChanged.connect(self.update_mode_note)
         self.business_secret_checkbox.stateChanged.connect(self.update_mode_note)
-        mode_row.addWidget(QLabel("処理モード:"))
-        mode_row.addWidget(self.mode_combo)
-        mode_row.addWidget(QLabel("仮名化範囲:"))
-        mode_row.addWidget(self.scope_combo)
-        mode_row.addWidget(self.business_secret_checkbox)
-        mode_row.addWidget(QLabel("PDF匿名化方法:"))
-        mode_row.addWidget(self.pdf_redaction_combo)
-        mode_row.addStretch(1)
-        layout.addLayout(mode_row)
-
-        self.mode_note.setWordWrap(True)
-        self.mode_note.setStyleSheet("border: 1px solid #fde68a; padding: 6px; background: #fffbeb; color: #713f12;")
-        layout.addWidget(self.mode_note)
+        self.mode_combo.setToolTip(
+            "分析継続用: 金額・数量・原価・評価などの分析項目は維持したまま、氏名や会社名などの識別情報だけを変換します。"
+            "社内での分析継続を想定した設定です。\n\n"
+            "外部共有用: 既存の匿名化方針に近い形で、企業機密にあたる項目(金額・数量など)も含めて変換対象にします。"
+            "社外へ提出・共有する場合に選びます。"
+        )
+        self.scope_combo.setToolTip(
+            "同じ人物・会社名などに、常に同じ仮名(個人001、法人001など)を割り当てる範囲を選びます。\n\n"
+            "このファイル内だけ: 今回のファイル1件の中でだけ仮名を統一します。\n"
+            "今回アップロードした一連のファイル内: 同じ操作で選んだ複数ファイルの間でも仮名を統一します。\n"
+            "プロジェクト内: さらに広い範囲(プロジェクト単位)で仮名を統一します。"
+        )
+        self.business_secret_checkbox.setToolTip(
+            "分析継続用モードでも、企業機密情報(金額・数量・原価・評価など)を追加で変換対象にします。"
+            "外部共有用モードでは常にオンとして扱われます。"
+        )
+        self.pdf_redaction_combo.setToolTip(
+            "PDFの匿名化箇所をどのように置き換えるかを選びます。仮名化(個人001などに置き換え)・部分マスキング・黒塗り・"
+            "白塗り・完全削除から選べます。PDFファイルを選んでいるときだけ有効です。"
+        )
+        settings_layout.addWidget(QLabel("処理モード:"))
+        settings_layout.addWidget(self.mode_combo)
+        settings_layout.addWidget(QLabel("仮名化範囲:"))
+        settings_layout.addWidget(self.scope_combo)
+        settings_layout.addWidget(self.business_secret_checkbox)
+        settings_layout.addWidget(QLabel("PDF匿名化方法:"))
+        settings_layout.addWidget(self.pdf_redaction_combo)
+        settings_layout.addStretch(1)
+        self.settings_panel.setVisible(False)
+        layout.addWidget(self.settings_panel)
         self.update_mode_note()
 
-        file_row = QHBoxLayout()
-        choose_button = QPushButton("Excel/PDF/Word/PowerPointを選択")
-        scan_button = QPushButton("検査開始")
-        convert_button = QPushButton("確認済みを変換保存")
-        choose_button.clicked.connect(self.choose_file)
-        scan_button.clicked.connect(self.scan_file)
-        convert_button.clicked.connect(self.convert_file)
-        file_row.addWidget(QLabel("ファイル:"))
-        file_row.addWidget(self.path_label, 1)
-        file_row.addWidget(choose_button)
-        file_row.addWidget(scan_button)
-        file_row.addWidget(convert_button)
-        layout.addLayout(file_row)
-
-        action_row = QHBoxLayout()
-        toggle_button = QPushButton("選択行を切替")
-        all_button = QPushButton("すべて変換")
-        none_button = QPushButton("すべて除外")
-        export_csv_button = QPushButton("検出結果CSV出力")
-        clear_history_button = QPushButton("履歴消去")
-        toggle_button.clicked.connect(self.toggle_selected)
-        all_button.clicked.connect(lambda: self.set_all_enabled(True))
-        none_button.clicked.connect(lambda: self.set_all_enabled(False))
-        export_csv_button.clicked.connect(self.export_findings_csv)
-        clear_history_button.clicked.connect(self.clear_history)
-        self.pdf_review_button.clicked.connect(self.open_pdf_review)
-        action_row.addWidget(toggle_button)
-        action_row.addWidget(all_button)
-        action_row.addWidget(none_button)
-        action_row.addWidget(self.pdf_review_button)
-        action_row.addWidget(export_csv_button)
-        action_row.addStretch(1)
-        action_row.addWidget(clear_history_button)
-        layout.addLayout(action_row)
+        # PDFの支援機能である旨の注意書きは、PDFを選んでいるときだけ表示する
+        # (常設の説明文は上の設定要約とツールチップに譲った)。
+        self.mode_note.setWordWrap(True)
+        self.mode_note.setStyleSheet("border: 1px solid #f59e0b; padding: 6px; background: #fffbeb; color: #92400e;")
+        self.mode_note.setVisible(False)
+        layout.addWidget(self.mode_note)
 
         headers = ["変換する", "変換しない", "シート", "セル", "種類", "検査", "検出値", "変換後", "理由"]
         self.table.setHorizontalHeaderLabels(headers)
+        self.table.horizontalHeaderItem(0).setToolTip("チェックした候補を匿名化の対象にします。")
+        self.table.horizontalHeaderItem(1).setToolTip("チェックした候補を、確認済みのうえで原文のまま維持します(Word/Excel/PowerPoint)。")
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.ExtendedSelection)
@@ -255,15 +363,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         self.table.setColumnWidth(4, 74)
         self.table.setColumnWidth(5, 90)
         self.table.setColumnWidth(7, 130)
-        self.table.itemDoubleClicked.connect(lambda _item: self.toggle_selected())
-        self.table.itemChanged.connect(self._on_table_item_changed)
         layout.addWidget(self.table, 1)
-
-        history_label = QLabel("変換履歴")
-        history_label.setStyleSheet("font-weight: 600;")
-        layout.addWidget(history_label)
-        self.history.setMaximumHeight(110)
-        layout.addWidget(self.history)
 
         self.status_label.setStyleSheet("border: 1px solid #cbd5e1; padding: 5px; background: #f8fafc;")
         layout.addWidget(self.status_label)
@@ -275,14 +375,14 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             self,
             "検査するファイルを選択",
             "",
-            "Supported files (*.xlsx *.xlsm *.pdf *.docx *.pptx);;Excel files (*.xlsx *.xlsm);;PDF files (*.pdf);;Word files (*.docx);;PowerPoint files (*.pptx)",
+            "Supported files (*.xlsx *.xlsm *.docx *.pptx *.pdf);;Excel files (*.xlsx *.xlsm);;Word files (*.docx);;PowerPoint files (*.pptx);;PDF files (*.pdf)",
         )
         if filename:
             self.set_source(Path(filename))
 
     def set_source(self, path: Path) -> None:
         if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-            QMessageBox.warning(self, "形式エラー", "対応形式は .xlsx / .xlsm / .pdf / .docx / .pptx です。")
+            QMessageBox.warning(self, "形式エラー", "対応形式は .xlsx / .xlsm / .docx / .pptx / .pdf です。")
             return
         self.processor.cleanup()
         if path.suffix.lower() in PDF_EXTENSIONS:
@@ -298,6 +398,8 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         self.word_decisions = []
         self.pptx_decisions = []
         self.path_label.setText(str(path))
+        self.scan_button.setEnabled(True)
+        self.convert_button.setEnabled(False)
         self.update_mode_note()
         self.refresh_table()
         if path.suffix.lower() in PDF_EXTENSIONS:
@@ -336,6 +438,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             if self.is_pdf_source() and isinstance(self.processor, PdfPrivacyProcessor):
                 restored_note = self._restore_pdf_review_state()
             self.refresh_table()
+            self.convert_button.setEnabled(bool(self.findings))
             formula_count = (
                 self.processor.enabled_formula_replacement_count(self.findings, options=options)
                 if isinstance(self.processor, ExcelPrivacyProcessor)
@@ -377,6 +480,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 busy_cursor = False
             QMessageBox.critical(self, "検査エラー", str(exc))
             self.status_label.setText("検査エラー")
+            self.convert_button.setEnabled(bool(self.findings))
             self.update_pdf_review_button()
         finally:
             if busy_cursor:
@@ -414,8 +518,27 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         busy_cursor = False
         try:
             self.update_findings_from_table()
-            self.status_label.setText("変換中: 一時コピーへ置換を適用しています...")
             options = self.current_options()
+
+            pdf_can_output = True
+            pdf_reasons: list[str] = []
+            if self.is_pdf_source() and isinstance(self.processor, PdfPrivacyProcessor):
+                pdf_can_output, pdf_reasons = final_output_status(
+                    self.findings,
+                    self.processor.page_quality,
+                    self.processor.confirmed_pages,
+                    self.processor.page_review_state,
+                )
+                if not pdf_can_output:
+                    QMessageBox.warning(self, "PDF出力不可", self._pdf_output_summary(pdf_can_output, pdf_reasons))
+                    self.status_label.setText("PDF出力不可")
+                    return
+
+            if QMessageBox.question(self, "出力確認", self._output_confirmation_message(options)) != QMessageBox.Yes:
+                self.status_label.setText("出力をキャンセルしました。")
+                return
+
+            self.status_label.setText("変換中: 一時コピーへ置換を適用しています...")
             if self.is_word_source() and isinstance(self.processor, WordPrivacyProcessor):
                 self._sync_word_decisions_from_findings()
                 QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -425,11 +548,6 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 QApplication.restoreOverrideCursor()
                 busy_cursor = False
                 output_path = result.output_path
-                converted_count = result.converted_run_count + result.converted_property_count
-                self.history.insertItem(
-                    0,
-                    f"{datetime.now():%Y/%m/%d %H:%M:%S}  {options.mode_label}  {converted_count} 件変換  {output_path.name}  一時ファイル削除済み",
-                )
                 self.status_label.setText(f"保存完了: {output_path}")
                 warning_note = ("\n\n警告:\n" + "\n".join(result.warnings)) if result.warnings else ""
                 QMessageBox.information(
@@ -449,11 +567,6 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 QApplication.restoreOverrideCursor()
                 busy_cursor = False
                 output_path = result.output_path
-                converted_count = result.converted_run_count + result.converted_property_count
-                self.history.insertItem(
-                    0,
-                    f"{datetime.now():%Y/%m/%d %H:%M:%S}  {options.mode_label}  {converted_count} 件変換  {output_path.name}  一時ファイル削除済み",
-                )
                 self.status_label.setText(f"保存完了: {output_path}")
                 warning_note = ("\n\n警告:\n" + "\n".join(result.warnings)) if result.warnings else ""
                 QMessageBox.information(
@@ -465,20 +578,10 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                     "原本は上書きしていません。一時コピーは削除済みです。",
                 )
             elif self.is_pdf_source() and isinstance(self.processor, PdfPrivacyProcessor):
-                can_output, reasons = final_output_status(
-                    self.findings,
-                    self.processor.page_quality,
-                    self.processor.confirmed_pages,
-                    self.processor.page_review_state,
-                )
-                summary = self._pdf_output_summary(can_output, reasons)
-                if not can_output:
-                    QMessageBox.warning(self, "PDF出力不可", summary)
-                    self.status_label.setText("PDF出力不可")
-                    return
-                if QMessageBox.question(self, "PDF最終出力確認", summary) != QMessageBox.Yes:
-                    self.status_label.setText("PDF出力をキャンセルしました。")
-                    return
+                # pdf_can_output was already confirmed further up, before the
+                # shared 出力確認 dialog -- asking the user to confirm output
+                # settings for a conversion that can't even run yet would be
+                # backwards.
                 QApplication.setOverrideCursor(Qt.WaitCursor)
                 busy_cursor = True
                 QApplication.processEvents()
@@ -491,10 +594,6 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 QApplication.restoreOverrideCursor()
                 busy_cursor = False
                 output_path = result.pdf_path
-                self.history.insertItem(
-                    0,
-                    f"{datetime.now():%Y/%m/%d %H:%M:%S}  PDF  {result.converted_count} 件変換  {output_path.name}  一時ファイル削除済み",
-                )
                 self.status_label.setText(f"保存完了: {output_path}")
                 QMessageBox.information(
                     self,
@@ -512,12 +611,6 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 QApplication.restoreOverrideCursor()
                 busy_cursor = False
                 output_path = result.excel_path
-                converted_count = result.converted_count
-                formula_note = f"  数式維持 {result.formula_maintained_count} 件" if result.formula_maintained_count else ""
-                self.history.insertItem(
-                    0,
-                    f"{datetime.now():%Y/%m/%d %H:%M:%S}  {options.mode_label}  {converted_count} 件変換{formula_note}  {output_path.name}  一時ファイル削除済み",
-                )
                 self.status_label.setText(f"保存完了: {output_path}")
                 QMessageBox.information(
                     self,
@@ -586,6 +679,8 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         dialog.exec()
         self._save_pdf_review_state()
         self.refresh_table()
+        self.update_pdf_review_button()
+        self.convert_button.setEnabled(bool(self.findings))
         self.status_label.setText("PDF候補確認を反映しました。全ページが確認済みになるまで最終出力できません。")
 
     def _is_unresolved_row(self, finding: Finding, is_word: bool, is_excel: bool, is_pptx: bool = False) -> bool:
@@ -615,32 +710,32 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         for row, finding in enumerate(self.findings):
             self.table.insertRow(row)
             is_unresolved = self._is_unresolved_row(finding, is_word, is_excel, is_pptx)
-            enabled = QTableWidgetItem()
-            enabled.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            enabled.setCheckState(Qt.Checked if finding.enabled else Qt.Unchecked)
-            if is_unresolved:
-                enabled.setBackground(UNRESOLVED_ROW_COLOR)
-            self.table.setItem(row, 0, enabled)
+
+            enabled_cell = _CheckboxCell()
+            enabled_cell.checkbox.setChecked(finding.enabled)
+            enabled_cell.checkbox.toggled.connect(lambda _checked, r=row: self._on_checkbox_toggled(r, 0))
+            self._style_checkbox_cell(enabled_cell, is_unresolved)
+            self.table.setCellWidget(row, 0, enabled_cell)
 
             # "変換しない" (reviewed-and-excluded) is a Word/PPTX/Excel concept
             # -- PDF has its own separate page-by-page review dialog and no
             # third state here, so the checkbox stays absent (not just
             # unchecked) for its rows.
-            excluded = QTableWidgetItem()
+            excluded_cell = _CheckboxCell()
             if is_word or is_pptx or is_excel:
-                excluded.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 if is_word:
                     is_excluded = row < len(self.word_decisions) and self.word_decisions[row].excluded
                 elif is_pptx:
                     is_excluded = row < len(self.pptx_decisions) and self.pptx_decisions[row].excluded
                 else:
                     is_excluded = finding.excluded
-                excluded.setCheckState(Qt.Checked if is_excluded else Qt.Unchecked)
+                excluded_cell.checkbox.setChecked(is_excluded)
+                excluded_cell.checkbox.toggled.connect(lambda _checked, r=row: self._on_checkbox_toggled(r, 1))
             else:
-                excluded.setFlags(Qt.ItemIsSelectable)
-            if is_unresolved:
-                excluded.setBackground(UNRESOLVED_ROW_COLOR)
-            self.table.setItem(row, 1, excluded)
+                excluded_cell.checkbox.setEnabled(False)
+                excluded_cell.checkbox.setVisible(False)
+            self._style_checkbox_cell(excluded_cell, is_unresolved)
+            self.table.setCellWidget(row, 1, excluded_cell)
 
             values = [
                 finding.sheet,
@@ -659,29 +754,37 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                     item.setBackground(UNRESOLVED_ROW_COLOR)
                 self.table.setItem(row, offset, item)
         self.table.blockSignals(False)
+        self._refresh_summary_counts()
+
+    def _row_checkbox(self, row: int, column: int) -> QCheckBox | None:
+        widget = self.table.cellWidget(row, column)
+        return widget.checkbox if isinstance(widget, _CheckboxCell) else None
+
+    def _style_checkbox_cell(self, cell: "_CheckboxCell", is_unresolved: bool) -> None:
+        cell.setStyleSheet(f"background-color: {UNRESOLVED_ROW_COLOR.name()};" if is_unresolved else "")
 
     def update_findings_from_table(self) -> None:
         for row, finding in enumerate(self.findings):
-            enabled_item = self.table.item(row, 0)
+            checkbox = self._row_checkbox(row, 0)
             entity_item = self.table.item(row, 4)
             replacement_item = self.table.item(row, 7)
-            finding.enabled = enabled_item is not None and enabled_item.checkState() == Qt.Checked
+            finding.enabled = checkbox is not None and checkbox.isChecked()
             if entity_item is not None and entity_item.text().strip():
                 finding.entity_type = entity_item.text().strip()
             if replacement_item is not None and replacement_item.text().strip():
                 finding.replacement = replacement_item.text().strip()
 
-    def _on_table_item_changed(self, item: QTableWidgetItem) -> None:
-        if item.column() not in (0, 1):
+    def _on_checkbox_toggled(self, row: int, column: int) -> None:
+        checkbox = self._row_checkbox(row, column)
+        if checkbox is None:
             return
-        row = item.row()
-        other_column = 1 - item.column()
-        if item.checkState() == Qt.Checked:
-            other_item = self.table.item(row, other_column)
-            if other_item is not None and other_item.checkState() == Qt.Checked:
-                self.table.blockSignals(True)
-                other_item.setCheckState(Qt.Unchecked)
-                self.table.blockSignals(False)
+        other_column = 1 - column
+        if checkbox.isChecked():
+            other_checkbox = self._row_checkbox(row, other_column)
+            if other_checkbox is not None and other_checkbox.isChecked():
+                other_checkbox.blockSignals(True)
+                other_checkbox.setChecked(False)
+                other_checkbox.blockSignals(False)
         if self.is_word_source():
             self._refresh_word_row_status(row)
         elif self.is_pptx_source():
@@ -690,13 +793,14 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             self._refresh_excel_row_status(row)
         elif isinstance(self.processor, PdfPrivacyProcessor):
             self._refresh_pdf_row_status(row)
+        self._refresh_summary_counts()
 
     def _refresh_pdf_row_status(self, row: int) -> None:
         if row >= len(self.findings):
             return
-        enabled_item = self.table.item(row, 0)
+        checkbox = self._row_checkbox(row, 0)
         finding = self.findings[row]
-        finding.enabled = enabled_item is not None and enabled_item.checkState() == Qt.Checked
+        finding.enabled = checkbox is not None and checkbox.isChecked()
         # 検査欄は常に「今のレビュー状態」を表す方針: 手動追加枠と結合済みの
         # 項目以外は、メイン一覧のチェックボックス操作でも
         # USER_APPROVED/USER_REJECTED に切り替える(PDF候補確認ダイアログの
@@ -712,6 +816,11 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
 
     def _refresh_row_highlight(self, row: int, is_unresolved: bool) -> None:
         for column in range(self.table.columnCount()):
+            if column in (0, 1):
+                cell_widget = self.table.cellWidget(row, column)
+                if isinstance(cell_widget, _CheckboxCell):
+                    self._style_checkbox_cell(cell_widget, is_unresolved)
+                continue
             cell_item = self.table.item(row, column)
             if cell_item is not None:
                 cell_item.setBackground(UNRESOLVED_ROW_COLOR if is_unresolved else QBrush())
@@ -719,12 +828,12 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
     def _refresh_excel_row_status(self, row: int) -> None:
         if row >= len(self.findings):
             return
-        enabled_item = self.table.item(row, 0)
-        excluded_item = self.table.item(row, 1)
+        enabled_checkbox = self._row_checkbox(row, 0)
+        excluded_checkbox = self._row_checkbox(row, 1)
         finding = self.findings[row]
-        finding.enabled = enabled_item is not None and enabled_item.checkState() == Qt.Checked
+        finding.enabled = enabled_checkbox is not None and enabled_checkbox.isChecked()
         finding.excluded = bool(
-            excluded_item is not None and excluded_item.checkState() == Qt.Checked and not finding.enabled
+            excluded_checkbox is not None and excluded_checkbox.isChecked() and not finding.enabled
         )
         if finding.detection_kind not in {"確認候補", EXCEL_NLP_DETECTION_KIND}:
             return
@@ -745,12 +854,12 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
     def _refresh_word_row_status(self, row: int) -> None:
         if row >= len(self.word_decisions):
             return
-        enabled_item = self.table.item(row, 0)
-        excluded_item = self.table.item(row, 1)
+        enabled_checkbox = self._row_checkbox(row, 0)
+        excluded_checkbox = self._row_checkbox(row, 1)
         decision = self.word_decisions[row]
-        decision.enabled = enabled_item is not None and enabled_item.checkState() == Qt.Checked
+        decision.enabled = enabled_checkbox is not None and enabled_checkbox.isChecked()
         decision.excluded = bool(
-            excluded_item is not None and excluded_item.checkState() == Qt.Checked and not decision.enabled
+            excluded_checkbox is not None and excluded_checkbox.isChecked() and not decision.enabled
         )
         status = word_finding_status(decision)
         if row < len(self.findings):
@@ -774,12 +883,12 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
     def _refresh_pptx_row_status(self, row: int) -> None:
         if row >= len(self.pptx_decisions):
             return
-        enabled_item = self.table.item(row, 0)
-        excluded_item = self.table.item(row, 1)
+        enabled_checkbox = self._row_checkbox(row, 0)
+        excluded_checkbox = self._row_checkbox(row, 1)
         decision = self.pptx_decisions[row]
-        decision.enabled = enabled_item is not None and enabled_item.checkState() == Qt.Checked
+        decision.enabled = enabled_checkbox is not None and enabled_checkbox.isChecked()
         decision.excluded = bool(
-            excluded_item is not None and excluded_item.checkState() == Qt.Checked and not decision.enabled
+            excluded_checkbox is not None and excluded_checkbox.isChecked() and not decision.enabled
         )
         status = pptx_finding_status(decision)
         if row < len(self.findings):
@@ -800,22 +909,11 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
             self._refresh_row_highlight(row, self._is_unresolved_row(self.findings[row], is_word=False, is_excel=False, is_pptx=True))
         self.table.blockSignals(False)
 
-    def toggle_selected(self) -> None:
-        rows = sorted({index.row() for index in self.table.selectedIndexes()})
-        for row in rows:
-            item = self.table.item(row, 0)
-            if item is not None:
-                item.setCheckState(Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked)
-
     def set_all_enabled(self, enabled: bool) -> None:
         for row in range(self.table.rowCount()):
-            item = self.table.item(row, 0)
-            if item is not None:
-                item.setCheckState(Qt.Checked if enabled else Qt.Unchecked)
-
-    def clear_history(self) -> None:
-        self.history.clear()
-        self.status_label.setText("履歴を消去しました。")
+            checkbox = self._row_checkbox(row, 0)
+            if checkbox is not None:
+                checkbox.setChecked(enabled)
 
     def current_options(self) -> ProcessingOptions:
         mode = str(self.mode_combo.currentData())
@@ -828,17 +926,41 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
     def update_mode_note(self) -> None:
         options = self.current_options()
         self.business_secret_checkbox.setEnabled(options.is_analysis)
-        if options.is_analysis:
-            self.mode_note.setText(
-                "分析継続用では、金額、数量、原価、評価などの分析項目を維持します。"
-                "外部へ提供する場合は、企業機密情報の追加変換を確認してください。"
-            )
-        else:
-            self.mode_note.setText("外部共有用では、既存の匿名化方針に近い形で企業機密項目も変換対象にします。")
-        if self.is_pdf_source():
-            self.mode_note.setText(self.mode_note.text() + "\n" + PDF_ASSISTANCE_NOTICE)
         self.pdf_redaction_combo.setEnabled(self.is_pdf_source())
+        # 分析継続用/外部共有用の一般的な説明はツールチップに譲り、ここでは
+        # PDF選択時の支援機能に関する注意書きだけを表示する。
+        self.mode_note.setText(PDF_ASSISTANCE_NOTICE)
+        self.mode_note.setVisible(self.is_pdf_source())
+        self.settings_toggle_button.setText(f"設定: {self._settings_summary_text()}  {'▴' if self._settings_expanded else '▾'}")
         self.update_pdf_review_button()
+
+    def _settings_summary_text(self) -> str:
+        options = self.current_options()
+        parts = [
+            options.mode_label,
+            "企業機密も変換する" if options.transform_business_secrets else "企業機密は変換しない",
+        ]
+        if self.is_pdf_source():
+            parts.append(PDF_REDACTION_MODES.get(str(self.pdf_redaction_combo.currentData()), ""))
+        return "・".join(part for part in parts if part)
+
+    def _toggle_settings_panel(self) -> None:
+        self._settings_expanded = not self._settings_expanded
+        self.settings_panel.setVisible(self._settings_expanded)
+        self.update_mode_note()
+
+    def _refresh_summary_counts(self) -> None:
+        total = len(self.findings)
+        target = sum(1 for finding in self.findings if finding.enabled)
+        is_word = self.is_word_source()
+        is_pptx = self.is_pptx_source()
+        is_excel = isinstance(self.processor, ExcelPrivacyProcessor)
+        unresolved = sum(
+            1 for finding in self.findings if self._is_unresolved_row(finding, is_word, is_excel, is_pptx)
+        )
+        self.summary_total_label.setText(f"検出 {total}件")
+        self.summary_unresolved_label.setText(f"要確認 {unresolved}件")
+        self.summary_target_label.setText(f"変換対象 {target}件")
 
     def is_pdf_source(self) -> bool:
         return self.source_path is not None and self.source_path.suffix.lower() in PDF_EXTENSIONS
@@ -852,9 +974,9 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
     def _sync_word_decisions_from_findings(self) -> None:
         for row, (decision, finding) in enumerate(zip(self.word_decisions, self.findings)):
             decision.enabled = finding.enabled
-            excluded_item = self.table.item(row, 1)
+            excluded_checkbox = self._row_checkbox(row, 1)
             decision.excluded = bool(
-                excluded_item is not None and excluded_item.checkState() == Qt.Checked and not decision.enabled
+                excluded_checkbox is not None and excluded_checkbox.isChecked() and not decision.enabled
             )
             if finding.replacement.strip():
                 decision.replacement = finding.replacement.strip()
@@ -862,21 +984,56 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
     def _sync_pptx_decisions_from_findings(self) -> None:
         for row, (decision, finding) in enumerate(zip(self.pptx_decisions, self.findings)):
             decision.enabled = finding.enabled
-            excluded_item = self.table.item(row, 1)
+            excluded_checkbox = self._row_checkbox(row, 1)
             decision.excluded = bool(
-                excluded_item is not None and excluded_item.checkState() == Qt.Checked and not decision.enabled
+                excluded_checkbox is not None and excluded_checkbox.isChecked() and not decision.enabled
             )
             if finding.replacement.strip():
                 decision.replacement = finding.replacement.strip()
 
     def update_pdf_review_button(self) -> None:
-        self.pdf_review_button.setEnabled(self.is_pdf_source() and isinstance(self.processor, PdfPrivacyProcessor) and bool(self.processor.temp_pdf))
+        is_pdf_scanned = self.is_pdf_source() and isinstance(self.processor, PdfPrivacyProcessor) and bool(self.processor.temp_pdf)
+        self.pdf_review_button.setVisible(self.is_pdf_source())
+        self.pdf_review_button.setEnabled(is_pdf_scanned)
+        if not is_pdf_scanned:
+            self.pdf_review_button.setText("PDFページを確認")
+            self.pdf_review_button.setStyleSheet("")
+            return
+        remaining = self._pdf_unreviewed_page_count()
+        if remaining > 0:
+            self.pdf_review_button.setText(f"PDFページを確認(残り{remaining}ページ)")
+            self.pdf_review_button.setStyleSheet(WARNING_BUTTON_STYLE)
+        else:
+            self.pdf_review_button.setText("PDFページを確認(確認済み)")
+            self.pdf_review_button.setStyleSheet("")
+
+    def _pdf_unreviewed_page_count(self) -> int:
+        if not isinstance(self.processor, PdfPrivacyProcessor):
+            return 0
+        completed_like = {"REVIEWED_NO_SENSITIVE_DATA", "REVIEWED_WITH_REDACTIONS", "COMPLETED"}
+        return sum(
+            1
+            for page_index in range(self.processor.page_count)
+            if self.processor.page_review_state.get(page_index) not in completed_like
+        )
 
     def _default_csv_name(self) -> str:
         folder = self.source_path.parent if self.source_path else Path.cwd()
         stem = self.source_path.stem if self.source_path else "検出結果"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return str(folder / f"{stem}_検出結果_{timestamp}.csv")
+
+    def _output_confirmation_message(self, options: ProcessingOptions) -> str:
+        lines = [
+            "次の設定で出力します。よろしいですか？",
+            "",
+            f"処理モード: {options.mode_label}",
+            f"企業機密も変換する: {'はい' if options.transform_business_secrets else 'いいえ'}",
+        ]
+        if self.is_pdf_source():
+            redaction_label = PDF_REDACTION_MODES.get(str(self.pdf_redaction_combo.currentData()), "")
+            lines.append(f"PDF匿名化方法: {redaction_label}")
+        return "\n".join(lines)
 
     def _pdf_output_summary(self, can_output: bool, reasons: list[str]) -> str:
         if not isinstance(self.processor, PdfPrivacyProcessor):

@@ -71,18 +71,17 @@ def test_excel_ai_candidate_exclude_checkbox_resolves_review_required_block(monk
             calls.clear()
 
             # Check "変換しない" for that row -- this is the fix for the block.
-            window.table.item(ai_row, 1).setCheckState(Qt.Checked)
+            window._row_checkbox(ai_row, 1).setChecked(True)
             assert_true(window.findings[ai_row].excluded, "Finding should now be marked excluded")
             assert_true(not window.findings[ai_row].enabled, "Excluded finding must stay disabled")
             assert_true(
-                window.table.item(ai_row, 0).checkState() == Qt.Unchecked,
+                not window._row_checkbox(ai_row, 0).isChecked(),
                 "Checking 変換しない must clear 変換する for the same row",
             )
             assert_true("除外" in window.findings[ai_row].reason, "Reason text should mention the exclusion")
 
             window.convert_file()
             assert_true(any(name == "information" for name, _ in calls), "Conversion should now succeed")
-            assert_true(window.history.count() == 1, "Conversion should append one history entry")
         finally:
             window.processor.cleanup()
             window.close()

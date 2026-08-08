@@ -81,14 +81,13 @@ def test_word_scan_and_convert_via_gui(monkeypatch) -> None:
             assert_true(entity_item is not None and not (entity_item.flags() & Qt.ItemIsEditable), "Word rows must not allow editing the category column")
 
             # Simulate a reviewer approving the review-required candidate via the checkbox.
-            checkbox_item = window.table.item(name_row, 0)
-            assert_true(checkbox_item is not None, "Checkbox item should exist")
-            checkbox_item.setCheckState(Qt.Checked)
+            checkbox = window._row_checkbox(name_row, 0)
+            assert_true(checkbox is not None, "Checkbox should exist")
+            checkbox.setChecked(True)
 
             window.convert_file()
 
             assert_true(any(name == "information" for name, _ in calls), "A success message box should have been shown")
-            assert_true(window.history.count() == 1, "Conversion should append one history entry")
         finally:
             window.processor.cleanup()
             window.close()
@@ -115,25 +114,25 @@ def test_word_exclude_checkbox_resolves_overlap_and_review_required_deadlock(mon
 
             # Enabling both (company auto-enabled by default, name checked here
             # too) must be blocked by the overlap guard.
-            window.table.item(name_row, 0).setCheckState(Qt.Checked)
+            window._row_checkbox(name_row, 0).setChecked(True)
             window.convert_file()
             assert_true(any(name == "critical" for name, _ in calls), "Enabling both overlapping candidates must raise an error, not silently convert")
             calls.clear()
 
             # Uncheck it again (still just "unresolved", not "reviewed") --
             # must still be blocked, now by the review-required guard.
-            window.table.item(name_row, 0).setCheckState(Qt.Unchecked)
+            window._row_checkbox(name_row, 0).setChecked(False)
             window.convert_file()
             assert_true(any(name == "critical" for name, _ in calls), "Leaving a review-required candidate merely unchecked must still block")
             calls.clear()
 
             # Check the "変換しない" (don't convert) checkbox for the name row --
             # this is the actual fix for the deadlock.
-            window.table.item(name_row, 1).setCheckState(Qt.Checked)
+            window._row_checkbox(name_row, 1).setChecked(True)
             assert_true(window.word_decisions[name_row].excluded, "Decision should now be marked excluded")
             assert_true(not window.word_decisions[name_row].enabled, "Excluded decision must stay disabled")
             assert_true(
-                window.table.item(name_row, 0).checkState() == Qt.Unchecked,
+                not window._row_checkbox(name_row, 0).isChecked(),
                 "Checking 変換しない must clear 変換する for the same row",
             )
 
