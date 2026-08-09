@@ -329,6 +329,38 @@ def test_bank_name_uses_financial_institution_alias_prefix() -> None:
         assert_true("みらい銀行" not in output_text and "金融機関" in output_text, "Bank name should be replaced in output")
 
 
+def test_highlight_redaction_mode_marks_replaced_run_yellow() -> None:
+    # "仮名化＋蛍光ペン" mode: replacement text is still written as normal (the
+    # original sensitive text is never kept), but the run carrying it also
+    # gets Word's native highlighter so a reviewer can see at a glance which
+    # runs were actually converted.
+    with tempfile.TemporaryDirectory(prefix="word_replacement_highlight_") as tmpdir:
+        tmp = Path(tmpdir)
+        source = tmp / "fixture.docx"
+        create_replacement_fixture(source)
+
+        processor = WordPrivacyProcessor()
+        decisions = processor.scan(source)
+        _enable_review_required(decisions)
+        result = processor.convert(source, decisions, output_dir=tmp, redaction_mode="highlight")
+
+        output_document = Document(result.output_path)
+        bank_run = next(run for run in output_document.paragraphs[2].runs if "金融機関" in run.text)
+        assert_true(bank_run.font.highlight_color is not None, "Replaced run should carry Word's highlighter in highlight mode")
+
+        # pseudonym mode (the previous, still-supported default behavior)
+        # must not apply any highlight.
+        plain_source = tmp / "fixture_plain.docx"
+        create_replacement_fixture(plain_source)
+        plain_processor = WordPrivacyProcessor()
+        plain_decisions = plain_processor.scan(plain_source)
+        _enable_review_required(plain_decisions)
+        plain_result = plain_processor.convert(plain_source, plain_decisions, output_dir=tmp, redaction_mode="pseudonym")
+        plain_document = Document(plain_result.output_path)
+        plain_bank_run = next(run for run in plain_document.paragraphs[2].runs if "金融機関" in run.text)
+        assert_true(plain_bank_run.font.highlight_color is None, "pseudonym mode must not apply any highlight")
+
+
 def test_hyperlink_target_candidates_are_disabled_by_default_and_guarded() -> None:
     with tempfile.TemporaryDirectory(prefix="word_replacement_") as tmpdir:
         tmp = Path(tmpdir)

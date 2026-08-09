@@ -17,8 +17,10 @@ from typing import Any
 
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
+from pptx.oxml.ns import qn
+from pptx.oxml.xmlchemy import OxmlElement
 
-from .excel_processor import AliasBook, ProcessingOptions, replacement_for
+from .excel_processor import AliasBook, OFFICE_REDACTION_MODES, ProcessingOptions, replacement_for
 from .ginza_japanese import GinzaEntityDetector, WORD_NLP_CONFIDENCE, WORD_NLP_DETECTION_RULE
 from .presidio_japanese import JapanesePresidioDetector, entity_label
 
@@ -432,10 +434,13 @@ class PptxPrivacyProcessor:
         source_path: Path,
         decisions: list[PptxReplacementDecision],
         output_dir: Path | None = None,
+        redaction_mode: str = "highlight",
         write_artifacts: bool = True,
     ) -> PptxConversionResult:
         if not self.temp_pptx or not self.temp_pptx.exists() or self.inventory is None:
             raise RuntimeError("先に検査を実行してください。")
+        if redaction_mode not in OFFICE_REDACTION_MODES:
+            raise RuntimeError(f"未対応の匿名化方法です: {redaction_mode}")
 
         warnings: list[str] = []
         enabled_decisions = [decision for decision in decisions if decision.enabled]
@@ -511,7 +516,7 @@ class PptxPrivacyProcessor:
             if paragraph_object is None:
                 continue
             run_items = _paragraph_runs_with_offsets(paragraph_object)
-            converted_run_count += _apply_paragraph_decisions(run_items, location_decisions)
+            converted_run_count += _apply_paragraph_decisions(run_items, location_decisions, redaction_mode)
 
         converted_property_count = 0
         for property_name, property_decision_list in decisions_by_property.items():
@@ -649,7 +654,11 @@ def _collect_text_frame_paragraphs(
         result[location_id] = paragraph
 
 
-def _apply_paragraph_decisions(run_items: list[dict[str, Any]], decisions: list[PptxReplacementDecision]) -> int:
+def _apply_paragraph_decisions(
+    run_items: list[dict[str, Any]],
+    decisions: list[PptxReplacementDecision],
+    redaction_mode: str = "highlight",
+) -> int:
     edits_by_run: dict[int, list[tuple[int, int, str]]] = {}
     for decision in decisions:
         candidate = decision.candidate
@@ -669,8 +678,44 @@ def _apply_paragraph_decisions(run_items: list[dict[str, Any]], decisions: list[
         for start, end, slice_text in sorted(edits, key=lambda item: item[0], reverse=True):
             text = text[:start] + slice_text + text[end:]
         run.text = text
+        if redaction_mode == "highlight":
+            _set_run_highlight(run)
         changed += 1
     return changed
+
+
+# Successor tag names per the ECMA-376 CT_TextCharacterProperties (a:rPr)
+# child sequence, taken from python-pptx's own eg_fillProperties successors
+# list in pptx/oxml/text.py (python-pptx has no built-in accessor for
+# a:highlight itself -- it's only referenced there as a position marker for
+# other elements). insert_element_before() needs this list to place
+# <a:highlight> correctly relative to whatever run properties (font name,
+# underline, hyperlink, ...) a real-world run may already carry, rather
+# than just appending it at the end and risking a schema-order violation
+# PowerPoint could reject on open.
+_HIGHLIGHT_SUCCESSOR_TAGS = (
+    "a:uLnTx", "a:uLn", "a:uFillTx", "a:uFill", "a:latin", "a:ea", "a:cs",
+    "a:sym", "a:hlinkClick", "a:hlinkMouseOver", "a:rtl", "a:extLst",
+)
+
+
+def _set_run_highlight(run: Any, color: str = "FFFF00") -> None:
+    """Mark a text run with a highlighter color.
+
+    python-pptx has no native highlight API (unlike python-docx's
+    font.highlight_color) -- DrawingML represents it as an <a:highlight>
+    child of <a:rPr> wrapping a solid color, which has to be built and
+    inserted via raw oxml.
+    """
+    run_properties = run._r.get_or_add_rPr()
+    existing = run_properties.find(qn("a:highlight"))
+    if existing is not None:
+        run_properties.remove(existing)
+    highlight = OxmlElement("a:highlight")
+    solid_color = OxmlElement("a:srgbClr")
+    solid_color.set("val", color)
+    highlight.append(solid_color)
+    run_properties.insert_element_before(highlight, *_HIGHLIGHT_SUCCESSOR_TAGS)
 
 
 def _paragraph_runs_with_offsets(paragraph: Any) -> list[dict[str, Any]]:

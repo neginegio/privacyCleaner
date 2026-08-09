@@ -9,7 +9,8 @@ import fitz
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from excel_privacy_cleaner.excel_processor import ProcessingOptions  # noqa: E402
-from excel_privacy_cleaner.pdf_ocr_support import CANDIDATE_REVIEW, USER_REJECTED, ocr_line_word_spans  # noqa: E402
+from excel_privacy_cleaner.models import Finding  # noqa: E402
+from excel_privacy_cleaner.pdf_ocr_support import CANDIDATE_REVIEW, PAGE_UNREVIEWED, USER_REJECTED, ocr_line_word_spans  # noqa: E402
 from excel_privacy_cleaner.pdf_processor import (  # noqa: E402
     PDF_ASSISTANCE_NOTICE,
     PdfPrivacyProcessor,
@@ -189,6 +190,67 @@ def test_pdf_review_state_roundtrip() -> None:
             raise AssertionError("Importing a review state saved for a different PDF should fail")
 
     print("pdf_review_state_roundtrip_tests=passed")
+
+
+def test_import_review_state_reopens_a_page_with_a_newly_surfaced_finding() -> None:
+    # Reproduces a real report: "PDFページを確認(確認済み)" showed while 100+
+    # findings were still 要確認. Root cause: a saved review-state file
+    # unconditionally restored each page's "reviewed" flag, without checking
+    # whether the freshly re-scanned findings for that page still included
+    # something unresolved. If a detection-rule fix (or just a different
+    # scan) surfaces a genuinely new finding on a page the saved file had no
+    # knowledge of, that finding keeps its default unresolved status (there
+    # is nothing to restore it from) while the page-level flag kept
+    # claiming full completion regardless -- exactly the contradiction
+    # reported. Importing a saved state must pull a page back out of
+    # "reviewed" whenever it still carries an unresolved finding afterward.
+    with tempfile.TemporaryDirectory(prefix="pdf_review_state_stale_test_") as tmp:
+        source = Path(tmp) / "sample.pdf"
+        create_text_pdf(source)
+
+        first_processor = PdfPrivacyProcessor()
+        first_findings = first_processor.scan(source, options=ProcessingOptions(mode="analysis"))
+        for finding in first_findings:
+            if finding.detection_kind == CANDIDATE_REVIEW:
+                finding.enabled = False
+                finding.detection_kind = USER_REJECTED
+        first_processor.mark_page_reviewed_with_redactions(0)
+        first_processor.mark_page_reviewed_with_redactions(1)
+        assert_true(0 in first_processor.confirmed_pages and 1 in first_processor.confirmed_pages, "Fixture sanity check: both pages should start reviewed")
+
+        state_path = pdf_review_state_path(source)
+        first_processor.export_review_state(state_path, source, first_findings, last_page=1)
+
+        second_processor = PdfPrivacyProcessor()
+        second_findings = second_processor.scan(source, options=ProcessingOptions(mode="analysis"))
+        # Simulate a detection-rule change surfacing a genuinely new,
+        # still-unresolved finding on page 1 that the saved state has no
+        # record of at all.
+        second_findings.append(
+            Finding(
+                enabled=False,
+                sheet="ページ1",
+                cell="1-9999 (x=0.0,y=0.0,w=1.0,h=1.0)",
+                entity_type="氏名",
+                detection_kind=CANDIDATE_REVIEW,
+                original="新規検出テキスト",
+                replacement="個人999",
+                reason="テスト用に追加した未解決候補",
+            )
+        )
+        second_processor.import_review_state(state_path, source, second_findings)
+
+        assert_true(
+            0 not in second_processor.confirmed_pages,
+            "Page 1 must be pulled back out of 'reviewed' once it has an unresolved finding after reconciliation",
+        )
+        assert_true(second_processor.page_review_state.get(0) == PAGE_UNREVIEWED, "Page 1's review state must revert to unreviewed")
+        assert_true(
+            1 in second_processor.confirmed_pages,
+            "Page 2, which has no unresolved findings, should stay reviewed",
+        )
+
+    print("pdf_import_review_state_reopens_stale_page_tests=passed")
 
 
 def test_pdf_cross_page_literal_propagation() -> None:

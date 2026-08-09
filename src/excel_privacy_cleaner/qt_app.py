@@ -9,8 +9,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QCloseEvent, QColor, QIcon
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
-    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -24,7 +24,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .excel_processor import EXCEL_NLP_DETECTION_KIND, ExcelPrivacyProcessor, ProcessingOptions, write_findings_csv
+from .excel_processor import (
+    EXCEL_NLP_DETECTION_KIND,
+    OFFICE_REDACTION_MODES,
+    ExcelPrivacyProcessor,
+    ProcessingOptions,
+    write_findings_csv,
+)
 from .models import Finding
 from .pdf_ocr_support import (
     CANDIDATE_AUTO,
@@ -109,6 +115,25 @@ WARNING_BUTTON_STYLE = (
     "QPushButton { background: #fef3c7; color: #92400e; font-weight: 600; padding: 6px 14px; border: 1px solid #f59e0b; border-radius: 4px; }"
     " QPushButton:hover:!disabled { background: #fde68a; }"
 )
+# choose_button/scan_button carried no stylesheet at all, so next to
+# convert_button's bold PRIMARY_BUTTON_STYLE box they read as smaller even
+# once sized to the exact same QSize -- a plain native button just has less
+# visual weight than a custom-styled one. This gives them the same boxed
+# look (border + padding) in a neutral color, keeping convert_button as the
+# only accent-colored (blue) button.
+SECONDARY_BUTTON_STYLE = (
+    "QPushButton { background: #f8fafc; color: #1e293b; font-weight: 600; padding: 6px 14px; border: 1px solid #cbd5e1; border-radius: 4px; }"
+    " QPushButton:disabled { background: #f1f5f9; color: #94a3b8; border-color: #e2e8f0; }"
+    " QPushButton:hover:!disabled { background: #e2e8f0; }"
+)
+# Used for the settings controls (処理モード/仮名化範囲/企業機密/匿名化方法),
+# now plain checkable QPushButtons instead of QComboBox/QCheckBox so the
+# currently-selected value is visible at a glance without opening anything.
+TOGGLE_BUTTON_STYLE = (
+    "QPushButton { background: #f1f5f9; color: #334155; padding: 4px 10px; border: 1px solid #cbd5e1; border-radius: 4px; }"
+    " QPushButton:checked { background: #2563eb; color: white; border-color: #2563eb; font-weight: 600; }"
+    " QPushButton:hover:!checked { background: #e2e8f0; }"
+)
 
 
 class _CheckboxCell(QWidget):
@@ -146,6 +171,17 @@ class _CheckboxCell(QWidget):
 
 def asset_path(relative_path: str) -> Path:
     return resource_path(relative_path)
+
+
+def _arrow_label() -> QLabel:
+    """A workflow-order arrow between the main action buttons.
+
+    A fresh QLabel each call -- a QWidget can only live in one layout slot,
+    so the two arrows in the workflow row can't share one instance.
+    """
+    label = QLabel("➡")
+    label.setStyleSheet("color: #94a3b8; font-size: 16px; font-weight: 600;")
+    return label
 
 
 def _finding_from_word_decision(decision: WordReplacementDecision) -> Finding:
@@ -202,23 +238,33 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         self.path_label = QLabel("未選択")
         self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.status_label = QLabel("待機中: 外部クラウドへ送信しません。")
-        self.mode_combo = QComboBox()
-        self.business_secret_checkbox = QCheckBox("企業機密も変換する")
-        self.scope_combo = QComboBox()
-        self.pdf_redaction_combo = QComboBox()
         self.choose_button = QPushButton("匿名化したいファイルを選択")
         self.scan_button = QPushButton("検査開始")
         self.convert_button = QPushButton("匿名化したファイルを出力")
         self.pdf_review_button = QPushButton("PDFページを確認")
         self.pdf_review_button.setToolTip("PDFの各ページを1ページずつ確認しながら、候補を承認・却下します(PDF検査後に有効化)。")
-        self.settings_toggle_button = QPushButton()
-        self.settings_panel = QWidget()
+        # 処理モード・仮名化範囲・匿名化方法は常時表示のトグルボタン群に
+        # している(以前はプルダウンで折りたたみパネルの奥に隠れていたが、
+        # 値が一目で見えないのは不自然という判断)。企業機密も変換するだけは
+        # チェックボックスのまま、出力ボタンの隣に置く(こちらの方が分かり
+        # やすいという判断)。_build_ui() で _build_exclusive_button_group()
+        # を使って組み立てる。
+        self.mode_group: QButtonGroup
+        self.mode_buttons: dict[str, QPushButton]
+        self.scope_group: QButtonGroup
+        self.scope_buttons: dict[str, QPushButton]
+        self.business_secret_checkbox = QCheckBox("企業機密も変換する")
+        self.office_redaction_group: QButtonGroup
+        self.office_redaction_buttons: dict[str, QPushButton]
+        self.office_redaction_container = QWidget()
+        self.pdf_redaction_group: QButtonGroup
+        self.pdf_redaction_buttons: dict[str, QPushButton]
+        self.pdf_redaction_container = QWidget()
         self.mode_note = QLabel("")
         self.summary_total_label = QLabel()
         self.summary_unresolved_label = QLabel()
         self.summary_target_label = QLabel()
         self.table = QTableWidget(0, 9)
-        self._settings_expanded = False
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -248,15 +294,108 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         self.convert_button.clicked.connect(self.convert_file)
         self.scan_button.setEnabled(False)
         self.convert_button.setEnabled(False)
+        self.choose_button.setStyleSheet(SECONDARY_BUTTON_STYLE)
+        self.scan_button.setStyleSheet(SECONDARY_BUTTON_STYLE)
         self.convert_button.setStyleSheet(PRIMARY_BUTTON_STYLE)
         self.pdf_review_button.clicked.connect(self.open_pdf_review)
         self.pdf_review_button.setVisible(False)
+        # ファーストアクションである「選択」から流れが伝わるよう、選択・検査
+        # 開始・出力の3つは同じ大きさに完全固定し、矢印で順序を示す。
+        # PDFページを確認だけは「(残りNページ)」のように検査後に動的に長く
+        # なるテキストを表示するため、完全固定するとその分だけ文字が欠けて
+        # しまう。高さと最小幅だけ他の3つに揃え、幅の上限は決めずテキストに
+        # 合わせて自然に広がるようにする。
+        uniform_size = self.choose_button.sizeHint().expandedTo(self.convert_button.sizeHint())
+        for button in (self.choose_button, self.scan_button, self.convert_button):
+            button.setFixedSize(uniform_size)
+        self.pdf_review_button.setFixedHeight(uniform_size.height())
+        self.pdf_review_button.setMinimumWidth(uniform_size.width())
         workflow_row.addWidget(self.choose_button)
+        workflow_row.addWidget(_arrow_label())
         workflow_row.addWidget(self.scan_button)
+        workflow_row.addWidget(_arrow_label())
         workflow_row.addWidget(self.pdf_review_button)
+        # Hidden/shown together with pdf_review_button in
+        # update_pdf_review_button() -- otherwise this arrow would still
+        # show for non-PDF sources (where pdf_review_button itself is
+        # hidden), reading as a stray double arrow before 出力.
+        self._pdf_review_arrow = _arrow_label()
+        workflow_row.addWidget(self._pdf_review_arrow)
         workflow_row.addWidget(self.convert_button)
+        # 企業機密も変換するは処理モード・仮名化範囲・匿名化方法とは別の、
+        # 出力に強く関わる設定なので、出力ボタンのすぐ右に間隔を空けて置く。
+        workflow_row.addSpacing(20)
+        self.business_secret_checkbox.setToolTip(
+            "分析継続用モードでも、企業機密情報(金額・数量・原価・評価など)を追加で変換対象にします。"
+            "外部共有用モードでは常にオンとして扱われます。"
+        )
+        self.business_secret_checkbox.stateChanged.connect(self.update_mode_note)
+        workflow_row.addWidget(self.business_secret_checkbox)
         workflow_row.addStretch(1)
         layout.addLayout(workflow_row)
+
+        # 処理モード・仮名化範囲・匿名化方法は常時表示のトグルボタン群に
+        # している(以前はプルダウンで折りたたみパネルの奥に隠れていたが、
+        # 値が一目で見えないのは不自然という判断)。匿名化方法はファイル
+        # 種別で選択肢が変わる(PDFは5種類、それ以外のオフィス系は2種類)
+        # ため、両方のボタン行を常設しておき、どちらか一方だけを丸ごと
+        # 表示/非表示で切り替える(update_mode_note内)。各項目の説明は
+        # ツールチップに譲り、ラベル+ボタンで余白を抑える。
+        settings_row_1 = QHBoxLayout()
+        self.mode_group, self.mode_buttons = self._build_exclusive_button_group(
+            [
+                ("analysis", "分析継続用", "金額・数量・原価・評価などの分析項目は維持したまま、氏名や会社名などの識別情報だけを変換します。社内での分析継続を想定した設定です。"),
+                ("external", "外部共有用", "既存の匿名化方針に近い形で、企業機密にあたる項目(金額・数量など)も含めて変換対象にします。社外へ提出・共有する場合に選びます。"),
+            ],
+            default_key="analysis",
+        )
+        self.scope_group, self.scope_buttons = self._build_exclusive_button_group(
+            [
+                ("file", "このファイル内だけ", "今回のファイル1件の中だけで、同じ人物・会社名に同じ仮名(個人001、法人001など)を割り当てます。"),
+                ("batch", "一連のファイル内", "同じ操作で選んだ複数ファイルの間でも仮名を統一します。"),
+                ("project", "プロジェクト内", "さらに広い範囲(プロジェクト単位)で仮名を統一します。"),
+            ],
+            default_key="file",
+        )
+        self.office_redaction_group, self.office_redaction_buttons = self._build_exclusive_button_group(
+            [
+                ("pseudonym", OFFICE_REDACTION_MODES["pseudonym"], "変換対象を個人001などの仮名に置き換えます。"),
+                ("highlight", OFFICE_REDACTION_MODES["highlight"], "変換対象を仮名に置き換えたうえで、置き換え後の文字に黄色の蛍光ペン/背景を付け、どこを変換したか一目で分かるようにします。"),
+            ],
+            default_key="highlight",
+        )
+        self.pdf_redaction_group, self.pdf_redaction_buttons = self._build_exclusive_button_group(
+            [(key, label, "") for key, label in PDF_REDACTION_MODES.items()],
+            default_key="black",
+        )
+        self.pdf_redaction_container.setToolTip(
+            "PDFの匿名化箇所をどのように置き換えるかを選びます。仮名化(個人001などに置き換え)・部分マスキング・黒塗り・"
+            "白塗り・完全削除から選べます。"
+        )
+        office_layout = QHBoxLayout(self.office_redaction_container)
+        office_layout.setContentsMargins(0, 0, 0, 0)
+        for button in self.office_redaction_buttons.values():
+            office_layout.addWidget(button)
+        pdf_layout = QHBoxLayout(self.pdf_redaction_container)
+        pdf_layout.setContentsMargins(0, 0, 0, 0)
+        for button in self.pdf_redaction_buttons.values():
+            pdf_layout.addWidget(button)
+        for button in self.mode_buttons.values():
+            button.toggled.connect(self.update_mode_note)
+        settings_row_1.addWidget(QLabel("処理モード:"))
+        for button in self.mode_buttons.values():
+            settings_row_1.addWidget(button)
+        settings_row_1.addWidget(QLabel("仮名化範囲:"))
+        for button in self.scope_buttons.values():
+            settings_row_1.addWidget(button)
+        # 匿名化方法は仮名化範囲のボタン群のすぐ右に間隔を空けて置く。
+        settings_row_1.addSpacing(16)
+        settings_row_1.addWidget(QLabel("匿名化方法:"))
+        settings_row_1.addWidget(self.office_redaction_container)
+        settings_row_1.addWidget(self.pdf_redaction_container)
+        settings_row_1.addStretch(1)
+        layout.addLayout(settings_row_1)
+        self.update_mode_note()
 
         action_row = QHBoxLayout()
         all_button = QPushButton("すべて変換")
@@ -271,75 +410,22 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         action_row.addWidget(all_button)
         action_row.addWidget(none_button)
         action_row.addWidget(export_csv_button)
+        # 検出/要確認/変換対象は操作ボタンではなく単なる集計表示なので、枠や
+        # 背景を付けてボタンに見せるのはやめ、プレーンなテキストにする。
+        # 検出結果CSV出力ボタンの右に間隔を空けて並べる。
+        action_row.addSpacing(24)
+        for label, style in (
+            (self.summary_total_label, "color: #475569;"),
+            (self.summary_unresolved_label, "color: #b45309; font-weight: 600;"),
+            (self.summary_target_label, "color: #475569;"),
+        ):
+            label.setStyleSheet(style)
+            action_row.addWidget(label)
         action_row.addStretch(1)
         layout.addLayout(action_row)
-
-        summary_row = QHBoxLayout()
-        for label, style in (
-            (self.summary_total_label, "background: #f8fafc; border: 1px solid #cbd5e1;"),
-            (self.summary_unresolved_label, "background: #fef3c7; border: 1px solid #f59e0b; color: #92400e;"),
-            (self.summary_target_label, "background: #f8fafc; border: 1px solid #cbd5e1;"),
-        ):
-            label.setStyleSheet(f"{style} padding: 6px 10px; border-radius: 4px;")
-            summary_row.addWidget(label)
-        summary_row.addStretch(1)
-        layout.addLayout(summary_row)
         self._refresh_summary_counts()
 
-        # 処理設定(処理モード・仮名化範囲・企業機密・PDF匿名化方法)は普段は
-        # 折りたたみ、現在の設定を1行要約したボタンだけを表示する。各項目の
-        # 説明はツールチップに譲る。
-        self.settings_toggle_button.setFlat(True)
-        self.settings_toggle_button.setStyleSheet("QPushButton { text-align: left; color: #475569; } QPushButton:hover { color: #1e293b; }")
-        self.settings_toggle_button.clicked.connect(self._toggle_settings_panel)
-        layout.addWidget(self.settings_toggle_button)
-
-        settings_layout = QHBoxLayout(self.settings_panel)
-        settings_layout.setContentsMargins(0, 0, 0, 0)
-        self.mode_combo.addItem("分析継続用", "analysis")
-        self.mode_combo.addItem("外部共有用", "external")
-        self.scope_combo.addItem("このファイル内だけ", "file")
-        self.scope_combo.addItem("今回アップロードした一連のファイル内", "batch")
-        self.scope_combo.addItem("プロジェクト内", "project")
-        for mode_key, mode_label in PDF_REDACTION_MODES.items():
-            self.pdf_redaction_combo.addItem(mode_label, mode_key)
-        self.business_secret_checkbox.setChecked(False)
-        self.mode_combo.currentIndexChanged.connect(self.update_mode_note)
-        self.business_secret_checkbox.stateChanged.connect(self.update_mode_note)
-        self.mode_combo.setToolTip(
-            "分析継続用: 金額・数量・原価・評価などの分析項目は維持したまま、氏名や会社名などの識別情報だけを変換します。"
-            "社内での分析継続を想定した設定です。\n\n"
-            "外部共有用: 既存の匿名化方針に近い形で、企業機密にあたる項目(金額・数量など)も含めて変換対象にします。"
-            "社外へ提出・共有する場合に選びます。"
-        )
-        self.scope_combo.setToolTip(
-            "同じ人物・会社名などに、常に同じ仮名(個人001、法人001など)を割り当てる範囲を選びます。\n\n"
-            "このファイル内だけ: 今回のファイル1件の中でだけ仮名を統一します。\n"
-            "今回アップロードした一連のファイル内: 同じ操作で選んだ複数ファイルの間でも仮名を統一します。\n"
-            "プロジェクト内: さらに広い範囲(プロジェクト単位)で仮名を統一します。"
-        )
-        self.business_secret_checkbox.setToolTip(
-            "分析継続用モードでも、企業機密情報(金額・数量・原価・評価など)を追加で変換対象にします。"
-            "外部共有用モードでは常にオンとして扱われます。"
-        )
-        self.pdf_redaction_combo.setToolTip(
-            "PDFの匿名化箇所をどのように置き換えるかを選びます。仮名化(個人001などに置き換え)・部分マスキング・黒塗り・"
-            "白塗り・完全削除から選べます。PDFファイルを選んでいるときだけ有効です。"
-        )
-        settings_layout.addWidget(QLabel("処理モード:"))
-        settings_layout.addWidget(self.mode_combo)
-        settings_layout.addWidget(QLabel("仮名化範囲:"))
-        settings_layout.addWidget(self.scope_combo)
-        settings_layout.addWidget(self.business_secret_checkbox)
-        settings_layout.addWidget(QLabel("PDF匿名化方法:"))
-        settings_layout.addWidget(self.pdf_redaction_combo)
-        settings_layout.addStretch(1)
-        self.settings_panel.setVisible(False)
-        layout.addWidget(self.settings_panel)
-        self.update_mode_note()
-
-        # PDFの支援機能である旨の注意書きは、PDFを選んでいるときだけ表示する
-        # (常設の説明文は上の設定要約とツールチップに譲った)。
+        # PDFの支援機能である旨の注意書きは、PDFを選んでいるときだけ表示する。
         self.mode_note.setWordWrap(True)
         self.mode_note.setStyleSheet("border: 1px solid #f59e0b; padding: 6px; background: #fffbeb; color: #92400e;")
         self.mode_note.setVisible(False)
@@ -373,6 +459,45 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         layout.addWidget(self.status_label)
 
         self.setCentralWidget(root)
+
+    def _build_exclusive_button_group(
+        self,
+        options: list[tuple[str, str, str]],
+        default_key: str,
+    ) -> tuple[QButtonGroup, dict[str, QPushButton]]:
+        """Build a set of mutually-exclusive checkable buttons.
+
+        options is a list of (key, label, tooltip). Exactly one button
+        starts checked (default_key) and QButtonGroup(exclusive=True)
+        keeps exactly one checked from then on, the same guarantee a
+        QComboBox's single current selection gave -- this replaces the
+        settings comboboxes with buttons whose state is visible without
+        opening anything.
+        """
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+        buttons: dict[str, QPushButton] = {}
+        for key, label, tooltip in options:
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setStyleSheet(TOGGLE_BUTTON_STYLE)
+            if tooltip:
+                button.setToolTip(tooltip)
+            if key == default_key:
+                button.setChecked(True)
+            group.addButton(button)
+            buttons[key] = button
+        return group, buttons
+
+    def _checked_key(self, buttons: dict[str, QPushButton]) -> str:
+        for key, button in buttons.items():
+            if button.isChecked():
+                return key
+        return next(iter(buttons))
+
+    def current_redaction_mode(self) -> str:
+        buttons = self.pdf_redaction_buttons if self.is_pdf_source() else self.office_redaction_buttons
+        return self._checked_key(buttons)
 
     def choose_file(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(
@@ -548,7 +673,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 QApplication.setOverrideCursor(Qt.WaitCursor)
                 busy_cursor = True
                 QApplication.processEvents()
-                result = self.processor.convert(self.source_path, self.word_decisions)
+                result = self.processor.convert(self.source_path, self.word_decisions, redaction_mode=self.current_redaction_mode())
                 QApplication.restoreOverrideCursor()
                 busy_cursor = False
                 output_path = result.output_path
@@ -567,7 +692,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 QApplication.setOverrideCursor(Qt.WaitCursor)
                 busy_cursor = True
                 QApplication.processEvents()
-                result = self.processor.convert(self.source_path, self.pptx_decisions)
+                result = self.processor.convert(self.source_path, self.pptx_decisions, redaction_mode=self.current_redaction_mode())
                 QApplication.restoreOverrideCursor()
                 busy_cursor = False
                 output_path = result.output_path
@@ -593,7 +718,7 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                     self.source_path,
                     self.findings,
                     options=options,
-                    redaction_mode=str(self.pdf_redaction_combo.currentData()),
+                    redaction_mode=self.current_redaction_mode(),
                 )
                 QApplication.restoreOverrideCursor()
                 busy_cursor = False
@@ -611,7 +736,9 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 QApplication.setOverrideCursor(Qt.WaitCursor)
                 busy_cursor = True
                 QApplication.processEvents()
-                result = self.processor.convert_with_artifacts(self.source_path, self.findings, options=options)
+                result = self.processor.convert_with_artifacts(
+                    self.source_path, self.findings, options=options, redaction_mode=self.current_redaction_mode()
+                )
                 QApplication.restoreOverrideCursor()
                 busy_cursor = False
                 output_path = result.excel_path
@@ -920,38 +1047,24 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
                 checkbox.setChecked(enabled)
 
     def current_options(self) -> ProcessingOptions:
-        mode = str(self.mode_combo.currentData())
+        mode = self._checked_key(self.mode_buttons)
         return ProcessingOptions(
             mode=mode,
             transform_business_secrets=self.business_secret_checkbox.isChecked() or mode == "external",
-            pseudonym_scope=str(self.scope_combo.currentData()),
+            pseudonym_scope=self._checked_key(self.scope_buttons),
         )
 
     def update_mode_note(self) -> None:
         options = self.current_options()
         self.business_secret_checkbox.setEnabled(options.is_analysis)
-        self.pdf_redaction_combo.setEnabled(self.is_pdf_source())
+        is_pdf = self.is_pdf_source()
+        self.office_redaction_container.setVisible(not is_pdf)
+        self.pdf_redaction_container.setVisible(is_pdf)
         # 分析継続用/外部共有用の一般的な説明はツールチップに譲り、ここでは
         # PDF選択時の支援機能に関する注意書きだけを表示する。
         self.mode_note.setText(PDF_ASSISTANCE_NOTICE)
-        self.mode_note.setVisible(self.is_pdf_source())
-        self.settings_toggle_button.setText(f"設定: {self._settings_summary_text()}  {'▴' if self._settings_expanded else '▾'}")
+        self.mode_note.setVisible(is_pdf)
         self.update_pdf_review_button()
-
-    def _settings_summary_text(self) -> str:
-        options = self.current_options()
-        parts = [
-            options.mode_label,
-            "企業機密も変換する" if options.transform_business_secrets else "企業機密は変換しない",
-        ]
-        if self.is_pdf_source():
-            parts.append(PDF_REDACTION_MODES.get(str(self.pdf_redaction_combo.currentData()), ""))
-        return "・".join(part for part in parts if part)
-
-    def _toggle_settings_panel(self) -> None:
-        self._settings_expanded = not self._settings_expanded
-        self.settings_panel.setVisible(self._settings_expanded)
-        self.update_mode_note()
 
     def _refresh_summary_counts(self) -> None:
         total = len(self.findings)
@@ -998,18 +1111,23 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
     def update_pdf_review_button(self) -> None:
         is_pdf_scanned = self.is_pdf_source() and isinstance(self.processor, PdfPrivacyProcessor) and bool(self.processor.temp_pdf)
         self.pdf_review_button.setVisible(self.is_pdf_source())
+        self._pdf_review_arrow.setVisible(self.is_pdf_source())
         self.pdf_review_button.setEnabled(is_pdf_scanned)
         if not is_pdf_scanned:
             self.pdf_review_button.setText("PDFページを確認")
-            self.pdf_review_button.setStyleSheet("")
+            self.pdf_review_button.setStyleSheet(SECONDARY_BUTTON_STYLE)
             return
         remaining = self._pdf_unreviewed_page_count()
         if remaining > 0:
             self.pdf_review_button.setText(f"PDFページを確認(残り{remaining}ページ)")
             self.pdf_review_button.setStyleSheet(WARNING_BUTTON_STYLE)
         else:
-            self.pdf_review_button.setText("PDFページを確認(確認済み)")
-            self.pdf_review_button.setStyleSheet("")
+            # Was "PDFページを確認(確認済み)" -- dropped the claim because it
+            # could say this while findings on that page were still 要確認
+            # (see the import_review_state fix in pdf_processor.py for the
+            # actual bug this pointed at). Keep the label itself neutral.
+            self.pdf_review_button.setText("PDFページを確認")
+            self.pdf_review_button.setStyleSheet(SECONDARY_BUTTON_STYLE)
 
     def _pdf_unreviewed_page_count(self) -> int:
         if not isinstance(self.processor, PdfPrivacyProcessor):
@@ -1028,15 +1146,15 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         return str(folder / f"{stem}_検出結果_{timestamp}.csv")
 
     def _output_confirmation_message(self, options: ProcessingOptions) -> str:
+        redaction_mode = self.current_redaction_mode()
+        redaction_modes = PDF_REDACTION_MODES if self.is_pdf_source() else OFFICE_REDACTION_MODES
         lines = [
             "次の設定で出力します。よろしいですか？",
             "",
             f"処理モード: {options.mode_label}",
             f"企業機密も変換する: {'はい' if options.transform_business_secrets else 'いいえ'}",
+            f"匿名化方法: {redaction_modes.get(redaction_mode, redaction_mode)}",
         ]
-        if self.is_pdf_source():
-            redaction_label = PDF_REDACTION_MODES.get(str(self.pdf_redaction_combo.currentData()), "")
-            lines.append(f"PDF匿名化方法: {redaction_label}")
         return "\n".join(lines)
 
     def _pdf_output_summary(self, can_output: bool, reasons: list[str]) -> str:

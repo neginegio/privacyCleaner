@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import load_workbook
+from openpyxl.styles import PatternFill
 from openpyxl.utils.cell import range_boundaries
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -32,6 +33,18 @@ from .presidio_japanese import (
 
 
 EXCEL_NLP_DETECTION_KIND = "AI候補"
+
+# Shared across Excel/Word/PPTX (the "office" formats) -- unlike PDF, which
+# offers several visual redaction treatments, these three only ever
+# replaced text with a pseudonym until "highlight" was added: mark the
+# replacement text itself (not the original) with a yellow
+# background/highlighter so a reviewer can see at a glance which cells/runs
+# were actually converted.
+OFFICE_REDACTION_MODES = {"pseudonym": "仮名化", "highlight": "仮名化＋蛍光ペン"}
+# openpyxl's Color prepends alpha "00" (fully transparent) to a bare 6-digit
+# RGB string instead of "FF" (opaque) -- a plain "FFFF00" here would produce
+# an invisible fill. Must be the full 8-digit ARGB form.
+HIGHLIGHT_FILL_COLOR = "FFFFFF00"
 
 
 @dataclass(frozen=True)
@@ -468,12 +481,14 @@ class ExcelPrivacyProcessor:
         findings: list[Finding],
         output_dir: Path | None = None,
         options: ProcessingOptions | None = None,
+        redaction_mode: str = "highlight",
     ) -> Path:
         return self.convert_with_artifacts(
             source_path,
             findings,
             output_dir=output_dir,
             options=options,
+            redaction_mode=redaction_mode,
             write_artifacts=False,
         ).excel_path
 
@@ -483,10 +498,13 @@ class ExcelPrivacyProcessor:
         findings: list[Finding],
         output_dir: Path | None = None,
         options: ProcessingOptions | None = None,
+        redaction_mode: str = "highlight",
         write_artifacts: bool = True,
     ) -> ConversionResult:
         if not self.temp_workbook or not self.temp_workbook.exists():
             raise RuntimeError("先に検査を実行してください。")
+        if redaction_mode not in OFFICE_REDACTION_MODES:
+            raise RuntimeError(f"未対応の匿名化方法です: {redaction_mode}")
 
         active_options = options or self.options
         blocked_candidates = [
@@ -535,6 +553,8 @@ class ExcelPrivacyProcessor:
             ]
             if full_cell:
                 cell.value = full_cell[-1].replacement
+                if redaction_mode == "highlight":
+                    _apply_highlight_fill(cell)
                 continue
 
             replaced_ranges: list[range] = []
@@ -557,6 +577,8 @@ class ExcelPrivacyProcessor:
                 current = _cleanup_alias_note_tail(current)
             current = _postprocess_text(current, active_options, sheet_name, coordinate)
             cell.value = current
+            if redaction_mode == "highlight":
+                _apply_highlight_fill(cell)
 
         for sheet in workbook.worksheets:
             if any(keyword in sheet.title for keyword in SKIP_SHEET_KEYWORDS):
@@ -1611,6 +1633,10 @@ def _generalize_role(value: str) -> str:
     if text in {"担当"}:
         return "担当者"
     return text
+
+
+def _apply_highlight_fill(cell: Any) -> None:
+    cell.fill = PatternFill(start_color=HIGHLIGHT_FILL_COLOR, end_color=HIGHLIGHT_FILL_COLOR, fill_type="solid")
 
 
 def _cleanup_address_tail(value: str) -> str:

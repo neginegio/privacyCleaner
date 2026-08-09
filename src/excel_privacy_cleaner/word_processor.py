@@ -16,8 +16,10 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
-from .excel_processor import AliasBook, ProcessingOptions, replacement_for
+from .excel_processor import AliasBook, OFFICE_REDACTION_MODES, ProcessingOptions, replacement_for
 from .ginza_japanese import GinzaEntityDetector, WORD_NLP_CONFIDENCE, WORD_NLP_DETECTION_RULE
 from .presidio_japanese import JapanesePresidioDetector, entity_label
 
@@ -579,10 +581,13 @@ class WordPrivacyProcessor:
         source_path: Path,
         decisions: list[WordReplacementDecision],
         output_dir: Path | None = None,
+        redaction_mode: str = "highlight",
         write_artifacts: bool = True,
     ) -> WordConversionResult:
         if not self.temp_docx or not self.temp_docx.exists() or self.inventory is None:
             raise RuntimeError("先に検査を実行してください。")
+        if redaction_mode not in OFFICE_REDACTION_MODES:
+            raise RuntimeError(f"未対応の匿名化方法です: {redaction_mode}")
 
         warnings: list[str] = []
         enabled_decisions = [decision for decision in decisions if decision.enabled]
@@ -684,7 +689,7 @@ class WordPrivacyProcessor:
             if paragraph_object is None:
                 continue
             run_items = _paragraph_runs_with_offsets(paragraph_object)
-            converted_run_count += _apply_paragraph_decisions(run_items, location_decisions)
+            converted_run_count += _apply_paragraph_decisions(run_items, location_decisions, redaction_mode)
 
         converted_property_count = 0
         for property_name, property_decision_list in decisions_by_property.items():
@@ -758,7 +763,11 @@ class WordPrivacyProcessor:
         return result
 
 
-def _apply_paragraph_decisions(run_items: list[dict[str, Any]], decisions: list[WordReplacementDecision]) -> int:
+def _apply_paragraph_decisions(
+    run_items: list[dict[str, Any]],
+    decisions: list[WordReplacementDecision],
+    redaction_mode: str = "highlight",
+) -> int:
     edits_by_run: dict[int, list[tuple[int, int, str]]] = {}
     for decision in decisions:
         candidate = decision.candidate
@@ -777,8 +786,28 @@ def _apply_paragraph_decisions(run_items: list[dict[str, Any]], decisions: list[
         for start, end, slice_text in sorted(edits, key=lambda item: item[0], reverse=True):
             text = text[:start] + slice_text + text[end:]
         run_items[run_index]["element"].text = text
+        if redaction_mode == "highlight":
+            _set_run_highlight(run_items[run_index]["element"])
         changed += 1
     return changed
+
+
+def _set_run_highlight(run_element: Any, color: str = "yellow") -> None:
+    """Mark a <w:r> run's text with Word's native highlighter (蛍光ペン).
+
+    run_element is the raw oxml <w:r> element (not a python-docx Run
+    wrapper) -- see _paragraph_runs_with_offsets, which stores lxml
+    elements directly. <w:highlight> is a run-property child, so it goes
+    inside <w:rPr>, which python-docx's CT_R element class already knows
+    how to get-or-create.
+    """
+    run_properties = run_element.get_or_add_rPr()
+    existing = run_properties.find(qn("w:highlight"))
+    if existing is not None:
+        run_properties.remove(existing)
+    highlight = OxmlElement("w:highlight")
+    highlight.set(qn("w:val"), color)
+    run_properties.append(highlight)
 
 
 def _find_residual_text(

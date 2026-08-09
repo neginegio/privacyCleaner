@@ -104,23 +104,44 @@ def test_summary_counts_reflect_findings() -> None:
         app.processEvents()
 
 
-def test_settings_panel_starts_collapsed_and_toggles() -> None:
+def test_settings_are_always_visible_buttons_with_correct_defaults() -> None:
+    # Reproduces "プルダウンをやめてボタンにしてほしい": 処理モード/仮名化範囲/
+    # 企業機密/匿名化方法 used to be QComboBox/QCheckBox hidden behind a
+    # collapsible panel (current value not visible without expanding it).
+    # They're now always-visible checkable QPushButtons, and the
+    # office/PDF 匿名化方法 button sets are mutually exclusive by file type.
     app = QApplication.instance() or QApplication([])
     window = ExcelPrivacyCleanerWindow()
     try:
         window.show()
         app.processEvents()
 
-        assert_true(not window.settings_panel.isVisible(), "設定 panel should start collapsed")
-        assert_true("分析継続用" in window.settings_toggle_button.text(), "Toggle button should summarize the current settings")
+        assert_true(window.mode_buttons["analysis"].isChecked(), "処理モード should default to 分析継続用")
+        assert_true(window.scope_buttons["file"].isChecked(), "仮名化範囲 should default to このファイル内だけ")
+        assert_true(not window.business_secret_checkbox.isChecked(), "企業機密も変換する should default to off")
 
-        window._toggle_settings_panel()
-        app.processEvents()
-        assert_true(window.settings_panel.isVisible(), "設定 panel should expand after toggling")
+        with tempfile.TemporaryDirectory(prefix="workflow_ui_redaction_") as tmpdir:
+            xlsx_source = Path(tmpdir) / "fixture.xlsx"
+            create_simple_xlsx(xlsx_source)
+            window.set_source(xlsx_source)
+            app.processEvents()
+            assert_true(window.office_redaction_container.isVisible(), "Office 匿名化方法 buttons should show for a non-PDF source")
+            assert_true(not window.pdf_redaction_container.isVisible(), "PDF 匿名化方法 buttons should stay hidden for a non-PDF source")
+            assert_true(window.office_redaction_buttons["highlight"].isChecked(), "Office default should be 仮名化＋蛍光ペン")
+            assert_true(window.current_redaction_mode() == "highlight", "current_redaction_mode() should read the office group for a non-PDF source")
 
-        window._toggle_settings_panel()
-        app.processEvents()
-        assert_true(not window.settings_panel.isVisible(), "設定 panel should collapse again after toggling twice")
+            pdf_source = Path(tmpdir) / "fixture.pdf"
+            create_simple_pdf(pdf_source)
+            window.set_source(pdf_source)
+            app.processEvents()
+            assert_true(window.pdf_redaction_container.isVisible(), "PDF 匿名化方法 buttons should show for a PDF source")
+            assert_true(not window.office_redaction_container.isVisible(), "Office 匿名化方法 buttons should hide for a PDF source")
+            assert_true(window.pdf_redaction_buttons["black"].isChecked(), "PDF default should be 黒塗り")
+            assert_true(window.current_redaction_mode() == "black", "current_redaction_mode() should read the PDF group for a PDF source")
+
+            # Buttons in a group stay mutually exclusive after switching files.
+            window.office_redaction_buttons["pseudonym"].setChecked(True)
+            assert_true(not window.office_redaction_buttons["highlight"].isChecked(), "Checking one office button should uncheck the other")
     finally:
         window.processor.cleanup()
         window.close()

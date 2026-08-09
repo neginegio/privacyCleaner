@@ -348,6 +348,41 @@ def test_csv_report_and_audit_json_output() -> None:
         )
 
 
+def test_highlight_redaction_mode_marks_replaced_run_yellow() -> None:
+    # "仮名化＋蛍光ペン" mode: replacement text is still written as normal (the
+    # original sensitive text is never kept), but the run carrying it also
+    # gets a highlighter, so a reviewer can see at a glance which runs were
+    # actually converted. python-pptx has no native highlight API, so the
+    # underlying implementation is raw oxml -- this exercises the real
+    # save/reload round trip, not just the in-memory element.
+    with tempfile.TemporaryDirectory(prefix="pptx_replacement_highlight_") as tmpdir:
+        tmp = Path(tmpdir)
+        source = tmp / "fixture.pptx"
+        create_replacement_fixture(source)
+
+        processor = PptxPrivacyProcessor()
+        decisions = processor.scan(source, options=ProcessingOptions(mode="analysis"))
+        _enable_review_required(decisions)
+        result = processor.convert(source, decisions, output_dir=tmp, redaction_mode="highlight")
+
+        reopened = Presentation(result.output_path)
+        title_run = reopened.slides[0].shapes.title.text_frame.paragraphs[0].runs[0]
+        assert_true("株式会社未来会議" not in title_run.text, "Original company name must not remain")
+        assert_true("highlight" in title_run._r.xml, "Replaced run should carry an <a:highlight> element in highlight mode")
+
+        # pseudonym mode (the previous, still-supported default behavior)
+        # must not apply any highlight.
+        plain_source = tmp / "fixture_plain.pptx"
+        create_replacement_fixture(plain_source)
+        plain_processor = PptxPrivacyProcessor()
+        plain_decisions = plain_processor.scan(plain_source, options=ProcessingOptions(mode="analysis"))
+        _enable_review_required(plain_decisions)
+        plain_result = plain_processor.convert(plain_source, plain_decisions, output_dir=tmp, redaction_mode="pseudonym")
+        plain_reopened = Presentation(plain_result.output_path)
+        plain_title_run = plain_reopened.slides[0].shapes.title.text_frame.paragraphs[0].runs[0]
+        assert_true("highlight" not in plain_title_run._r.xml, "pseudonym mode must not apply any highlight")
+
+
 def test_pptx_candidate_location_label_and_status_helpers() -> None:
     with tempfile.TemporaryDirectory(prefix="pptx_helpers_") as tmpdir:
         tmp = Path(tmpdir)
