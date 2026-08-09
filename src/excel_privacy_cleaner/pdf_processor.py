@@ -820,6 +820,30 @@ class PdfPrivacyProcessor:
                     rect,  # type: ignore[arg-type]
                 )
 
+        # A page's saved "reviewed" flag can go stale: it was restored above
+        # from the saved file alone, before this loop had any chance to see
+        # which of the freshly re-scanned findings could actually be
+        # matched back to a saved decision. A finding the saved state never
+        # knew about (e.g. because detection rules improved since the state
+        # was saved, surfacing a genuinely new candidate) has nothing to
+        # restore from and keeps its default unresolved status -- but nulling
+        # nothing back out of "reviewed" left the page-level flag claiming
+        # full completion regardless, which is how a real report of "PDF
+        # ページを確認(確認済み)" showing alongside 100+ 要確認 findings
+        # happened: the saved review state predated a PDF-detection fix that
+        # surfaced many new findings on already-"completed" pages. Any page
+        # that still carries an unresolved finding after reconciliation must
+        # be pulled back out of "reviewed", using the exact same
+        # still-needs-review condition the review dialog's own
+        # mark_page_checked() gate uses.
+        for finding in findings:
+            if finding.detection_kind not in {"確認候補", CANDIDATE_REVIEW}:
+                continue
+            page_index = _page_index_from_label(finding.sheet)
+            if page_index in self.confirmed_pages:
+                self.confirmed_pages.discard(page_index)
+                self.page_review_state[page_index] = PAGE_UNREVIEWED
+
     def _append_pdf_finding(
         self,
         findings: list[Finding],

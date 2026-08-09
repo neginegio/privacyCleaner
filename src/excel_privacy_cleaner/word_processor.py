@@ -16,8 +16,10 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
-from .excel_processor import AliasBook, ProcessingOptions, replacement_for
+from .excel_processor import AliasBook, OFFICE_REDACTION_MODES, ProcessingOptions, replacement_for
 from .ginza_japanese import GinzaEntityDetector, WORD_NLP_CONFIDENCE, WORD_NLP_DETECTION_RULE
 from .presidio_japanese import JapanesePresidioDetector, entity_label
 
@@ -28,10 +30,20 @@ WORD_MACRO_EXTENSION = ".docm"
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
-WORD_CANDIDATE_CATEGORIES = {"会社名", "氏名", "住所", "電話番号", "メールアドレス", "銀行名"}
+WORD_CANDIDATE_CATEGORIES = {"会社名", "氏名", "住所", "電話番号", "メールアドレス", "銀行名", "銀行口座"}
 COMPANY_DESIGNATORS = ("株式会社", "有限会社", "合同会社", "医療法人", "学校法人", "社会福祉法人")
 COMPANY_SUFFIX_DESIGNATORS = ("株式会社", "有限会社", "合同会社")
-WORD_NAME_CHARS = r"一-龯々〆ヵヶぁ-んァ-ヶーA-Za-z0-9"
+# Includes full-width Latin letters/digits (Ａ-Ｚａ-ｚ０-９) alongside the
+# half-width ranges -- real documents routinely spell out business/bank
+# names with full-width Latin (e.g. "三菱ＵＦＪ銀行"), and a class missing
+# them silently breaks the match partway through the name instead of
+# erroring, which is how that exact bank name went undetected.
+WORD_NAME_CHARS = r"一-龯々〆ヵヶぁ-んァ-ヶーA-Za-zＡ-Ｚａ-ｚ0-9０-９"
+# Half-width katakana, used for name fields that ask for a katakana
+# "reading" (e.g. bank forms' 口座名義人（カタカナ）) -- these are commonly
+# typed in half-width, not the full-width katakana WORD_NAME_CHARS already
+# covers.
+WORD_HALFWIDTH_KATAKANA_CHARS = r"ｦ-ﾟ"
 WORD_REVIEW_CONFIDENCE_THRESHOLD = 0.75
 WORD_AUDIT_SCHEMA = "word_audit_v1"
 
@@ -214,6 +226,7 @@ WORD_CATEGORY_ALIAS_KIND = {
     "住所": "address",
     "電話番号": "phone",
     "メールアドレス": "email",
+    "銀行口座": "bank_account",
 }
 
 
@@ -343,8 +356,21 @@ def _section_stories(section: Any) -> tuple[tuple[str, str, Any], ...]:
 
 
 def _iter_table_paragraph_objects(table: Any) -> Iterator[Any]:
+    # Must dedupe merged cells the same way _append_table does (see its
+    # comment) -- this function is the *other* place table cells get
+    # walked, used both to build the actual candidate/structure inventory
+    # for some callers and, in WordPrivacyProcessor.convert()'s live
+    # re-scan sanity check, to confirm the document's paragraph count still
+    # matches what scan() recorded. A mismatch here made every conversion
+    # of a document with a merged table cell fail that check ("構造が変化
+    # しました。再スキャンしてください。") the moment _append_table's own
+    # count stopped including the duplicates.
+    seen_cell_elements: set[Any] = set()
     for row in table.rows:
         for cell in row.cells:
+            if cell._tc in seen_cell_elements:
+                continue
+            seen_cell_elements.add(cell._tc)
             yield from cell.paragraphs
 
 
@@ -385,7 +411,142 @@ def candidates_for_inventory(inventory: WordStructureInventory) -> tuple[WordCan
         if value:
             _append_property_candidates(candidates, seen, inventory, property_name, value, detector, ginza_detector)
 
+    _append_table_column_account_number_candidates(candidates, seen, inventory, runs_by_location)
+    _append_address_continuation_candidates(candidates, seen, inventory, runs_by_location)
+
     return tuple(candidates)
+
+
+def _append_address_continuation_candidates(
+    candidates: list[WordCandidate],
+    seen: set[tuple[str, str, int, int, str, str]],
+    inventory: WordStructureInventory,
+    runs_by_location: dict[str, tuple[WordTextRun, ...]],
+) -> None:
+    """Recover an address's building name/room number left in the very next
+    paragraph.
+
+    Some forms split an address across two paragraphs -- one with the
+    prefecture/city/street ("住所：愛知県名古屋市熱田区六野1-2-19"), the very
+    next with just the building name and room number
+    ("センチュリースクエア神宮306") and nothing an address detector can key
+    off of at all: no prefecture, no "住所" label, no address-typical
+    keyword. Scoped tightly to a short, unpunctuated paragraph immediately
+    following an already-detected address in the same container (so it
+    never reaches across a table cell boundary or absorbs an unrelated
+    sentence), and always left REVIEW_REQUIRED like any other
+    structurally-inferred (not directly matched) candidate.
+    """
+    address_paragraph_ids = {
+        candidate.location_id for candidate in candidates if candidate.category == "住所" and candidate.source == "paragraph"
+    }
+    if not address_paragraph_ids:
+        return
+    already_covered = {candidate.location_id for candidate in candidates}
+    paragraphs = inventory.paragraphs
+    for index, paragraph in enumerate(paragraphs):
+        if _paragraph_location_id(paragraph) not in address_paragraph_ids:
+            continue
+        if index + 1 >= len(paragraphs):
+            continue
+        next_paragraph = paragraphs[index + 1]
+        if (
+            next_paragraph.container_type != paragraph.container_type
+            or next_paragraph.table_index != paragraph.table_index
+            or next_paragraph.cell_index != paragraph.cell_index
+        ):
+            continue
+        next_id = _paragraph_location_id(next_paragraph)
+        if next_id in already_covered:
+            continue
+        text = next_paragraph.text.strip()
+        if not text or len(text) > 40:
+            continue
+        if any(marker in text for marker in ("：", ":", "。", "、", "。")):
+            continue
+        start = next_paragraph.text.index(text)
+        end = start + len(text)
+        runs = runs_by_location.get(next_id, ())
+        _append_candidate(
+            candidates,
+            seen,
+            inventory,
+            next_paragraph,
+            next_paragraph.text,
+            start,
+            end,
+            "住所",
+            "word_address_continuation",
+            0.65,
+            "paragraph",
+            affected_runs=_affected_run_indices(runs, start, end),
+            original_category="住所",
+        )
+        already_covered.add(next_id)
+
+
+_ACCOUNT_NUMBER_HEADER_WORDS = ("口座番号", "口座No", "口座NO", "口座no")
+_ACCOUNT_NUMBER_VALUE_RE = re.compile(r"[0-9０-９][0-9０-９\-ー]{3,13}")
+
+
+def _append_table_column_account_number_candidates(
+    candidates: list[WordCandidate],
+    seen: set[tuple[str, str, int, int, str, str]],
+    inventory: WordStructureInventory,
+    runs_by_location: dict[str, tuple[WordTextRun, ...]],
+) -> None:
+    """Recover a bank account number sitting in a table cell with no label
+    of its own.
+
+    Bank-detail tables (as in the "振込口座" form this was found against)
+    commonly put labels in a header row and the actual values in cells
+    further down the same column, e.g. a "口座番号" header cell with the
+    real account number in a completely separate cell below it that
+    contains nothing but digits. The word_account_number_label regex rule
+    above only matches when the label and the value share one paragraph, so
+    it has nothing to catch there -- the value cell alone gives no signal
+    it's sensitive at all. Scoped to table cells that share a column with a
+    cell reading one of the known header labels elsewhere in the same
+    table, so a bare digit run is only ever treated as an account number
+    when a real column header actually says so (never a blanket
+    any-digit-string rule, which would be far too prone to false
+    positives).
+    """
+    columns: dict[tuple[int, int], list[WordParagraphText]] = {}
+    for paragraph in inventory.paragraphs:
+        if paragraph.table_index is None or paragraph.cell_index is None:
+            continue
+        columns.setdefault((paragraph.table_index, paragraph.cell_index), []).append(paragraph)
+
+    for paragraphs in columns.values():
+        if not any(p.text.strip() in _ACCOUNT_NUMBER_HEADER_WORDS for p in paragraphs):
+            continue
+        for paragraph in paragraphs:
+            text = paragraph.text
+            stripped = text.strip()
+            if stripped in _ACCOUNT_NUMBER_HEADER_WORDS:
+                continue
+            match = _ACCOUNT_NUMBER_VALUE_RE.fullmatch(stripped)
+            if not match:
+                continue
+            start = text.index(stripped)
+            end = start + len(stripped)
+            runs = runs_by_location.get(_paragraph_location_id(paragraph), ())
+            _append_candidate(
+                candidates,
+                seen,
+                inventory,
+                paragraph,
+                text,
+                start,
+                end,
+                "銀行口座",
+                "word_account_number_column",
+                0.85,
+                "paragraph",
+                affected_runs=_affected_run_indices(runs, start, end),
+                original_category="銀行口座",
+            )
 
 
 class WordPrivacyProcessor:
@@ -420,10 +581,13 @@ class WordPrivacyProcessor:
         source_path: Path,
         decisions: list[WordReplacementDecision],
         output_dir: Path | None = None,
+        redaction_mode: str = "highlight",
         write_artifacts: bool = True,
     ) -> WordConversionResult:
         if not self.temp_docx or not self.temp_docx.exists() or self.inventory is None:
             raise RuntimeError("先に検査を実行してください。")
+        if redaction_mode not in OFFICE_REDACTION_MODES:
+            raise RuntimeError(f"未対応の匿名化方法です: {redaction_mode}")
 
         warnings: list[str] = []
         enabled_decisions = [decision for decision in decisions if decision.enabled]
@@ -525,7 +689,7 @@ class WordPrivacyProcessor:
             if paragraph_object is None:
                 continue
             run_items = _paragraph_runs_with_offsets(paragraph_object)
-            converted_run_count += _apply_paragraph_decisions(run_items, location_decisions)
+            converted_run_count += _apply_paragraph_decisions(run_items, location_decisions, redaction_mode)
 
         converted_property_count = 0
         for property_name, property_decision_list in decisions_by_property.items():
@@ -599,7 +763,11 @@ class WordPrivacyProcessor:
         return result
 
 
-def _apply_paragraph_decisions(run_items: list[dict[str, Any]], decisions: list[WordReplacementDecision]) -> int:
+def _apply_paragraph_decisions(
+    run_items: list[dict[str, Any]],
+    decisions: list[WordReplacementDecision],
+    redaction_mode: str = "highlight",
+) -> int:
     edits_by_run: dict[int, list[tuple[int, int, str]]] = {}
     for decision in decisions:
         candidate = decision.candidate
@@ -618,8 +786,28 @@ def _apply_paragraph_decisions(run_items: list[dict[str, Any]], decisions: list[
         for start, end, slice_text in sorted(edits, key=lambda item: item[0], reverse=True):
             text = text[:start] + slice_text + text[end:]
         run_items[run_index]["element"].text = text
+        if redaction_mode == "highlight":
+            _set_run_highlight(run_items[run_index]["element"])
         changed += 1
     return changed
+
+
+def _set_run_highlight(run_element: Any, color: str = "yellow") -> None:
+    """Mark a <w:r> run's text with Word's native highlighter (蛍光ペン).
+
+    run_element is the raw oxml <w:r> element (not a python-docx Run
+    wrapper) -- see _paragraph_runs_with_offsets, which stores lxml
+    elements directly. <w:highlight> is a run-property child, so it goes
+    inside <w:rPr>, which python-docx's CT_R element class already knows
+    how to get-or-create.
+    """
+    run_properties = run_element.get_or_add_rPr()
+    existing = run_properties.find(qn("w:highlight"))
+    if existing is not None:
+        run_properties.remove(existing)
+    highlight = OxmlElement("w:highlight")
+    highlight.set(qn("w:val"), color)
+    run_properties.append(highlight)
 
 
 def _find_residual_text(
@@ -893,8 +1081,30 @@ def _append_table(
     element_path_prefix: str,
     is_linked_to_previous: bool = False,
 ) -> None:
+    # A merged cell (horizontal gridSpan or vertical vMerge) is the *same*
+    # underlying <w:tc> XML element wrapped in a fresh python-docx _Cell
+    # object at every column/row position it spans -- table.rows[i].cells
+    # does not deduplicate this. Left unguarded, a cell merged across N
+    # columns gets its paragraph extracted N times as if it were N distinct
+    # locations, and applying a redaction decision to what's actually one
+    # physical run N times corrupts it (observed: a redacted katakana name
+    # merged across 4 columns came out of a real document as
+    # "個人004040404" instead of "個人004", the replacement having been
+    # applied to its own already-replaced text on the 2nd+ pass).
+    # Holds the actual elements (not id(cell._tc) ints) so they stay alive
+    # for the whole loop -- python-docx hands back a fresh _Cell wrapper on
+    # every `row.cells` access, and once nothing references the previous
+    # wrapper/element it can be garbage-collected, at which point Python is
+    # free to recycle its id() for the next object created. Deduping by raw
+    # id() alone was verified to misfire this way on a real document: two
+    # cells several rows apart got the same recycled id() and the second
+    # one's paragraphs were wrongly skipped as "already seen".
+    seen_cell_elements: set[Any] = set()
     for row_index, row in enumerate(table.rows):
         for cell_index, cell in enumerate(row.cells):
+            if cell._tc in seen_cell_elements:
+                continue
+            seen_cell_elements.add(cell._tc)
             for cell_paragraph_index, paragraph in enumerate(cell.paragraphs):
                 _append_paragraph(
                     paragraphs,
@@ -1291,26 +1501,38 @@ def _regex_candidate_results(text: str) -> list[tuple[int, int, str, str, float,
     rules = (
         (
             "会社名",
-            r"(?:会社名|法人名|取引先|顧客企業)[:：]\s*([一-龯々〆ヵヶぁ-んァ-ヶーA-Za-z0-9]{2,24})",
+            rf"(?:会社名|法人名|取引先|顧客企業)[:：]\s*([{WORD_NAME_CHARS}]{{2,24}})",
             "word_company_label",
             0.82,
         ),
         (
             "銀行名",
-            r"(?:銀行名|金融機関|振込先|口座)[:：は\s]*([一-龯々〆ヵヶぁ-んァ-ヶーA-Za-z0-9]{2,20}(?:銀行|信用金庫|信用組合))",
+            rf"(?:銀行名|金融機関|振込先|口座)[:：は\s]*([{WORD_NAME_CHARS}]{{2,20}}(?:銀行|信用金庫|信用組合))",
             "word_bank_label",
             0.90,
         ),
         (
             "銀行名",
-            r"([一-龯々〆ヵヶぁ-んァ-ヶーA-Za-z0-9]{2,20}(?:銀行|信用金庫|信用組合))",
+            rf"([{WORD_NAME_CHARS}]{{2,20}}(?:銀行|信用金庫|信用組合))",
             "word_bank_name",
             0.86,
+        ),
+        (
+            "銀行口座",
+            r"口座番号[:：は\s]*([0-9０-９][0-9０-９\-ー]{3,13})",
+            "word_account_number_label",
+            0.85,
         ),
         (
             "氏名",
             r"([一-龯々〆ヵヶ]{1,4}[ 　]+[一-龯々〆ヵヶ]{1,5})",
             "word_japanese_full_name_space",
+            0.70,
+        ),
+        (
+            "氏名",
+            rf"([{WORD_HALFWIDTH_KATAKANA_CHARS}]{{2,6}}[ 　]+[{WORD_HALFWIDTH_KATAKANA_CHARS}]{{2,10}})",
+            "word_katakana_full_name_space",
             0.70,
         ),
         (
