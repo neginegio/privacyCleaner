@@ -350,8 +350,12 @@ class ExcelPrivacyCleanerWindow(QMainWindow):
         self.table.horizontalHeaderItem(0).setToolTip("チェックした候補を匿名化の対象にします。")
         self.table.horizontalHeaderItem(1).setToolTip("チェックした候補を、確認済みのうえで原文のまま維持します(Word/Excel/PowerPoint)。")
         self.table.setAlternatingRowColors(True)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
+        # Row selection highlight made cell text unreadable (dark text on
+        # the highlight color), and nothing in this window actually reads
+        # selection state anymore -- the "選択行を切替" action that used to
+        # depend on it was removed. Disabling it outright is simpler than
+        # fighting the highlight palette for a feature nothing else needs.
+        self.table.setSelectionMode(QTableWidget.NoSelection)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
