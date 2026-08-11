@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 build/
 dist/
+dist_installer/
 *.spec
 *_匿名化_*.xlsx
 *_検証結果_*.xlsx
